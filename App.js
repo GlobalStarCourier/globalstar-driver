@@ -1,20 +1,34 @@
+import React from 'react';
+import { NavigationContainer } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+
+import PackageListScreen from './screens/PackageListScreen';
+import PackageDetailScreen from './screens/PackageDetailScreen';
+import LabelScannerScreen from './screens/LabelScannerScreen';
+import ProfileScreen from './screens/ProfileScreen';
+import { PackageProvider } from './context/PackageContext';
+
+const Stack = createNativeStackNavigator();
 
 export default function App() {
   return (
-    <View style={styles.container}>
-      <Text>Open up App.js to start working on your app!</Text>
-      <StatusBar style="auto" />
-    </View>
+    <PackageProvider>
+      <NavigationContainer>
+        <Stack.Navigator
+          initialRouteName="PackageList"
+          screenOptions={{
+            headerShown: false,
+            animation: 'slide_from_right'
+          }}
+        >
+          <Stack.Screen name="PackageList" component={PackageListScreen} />
+          <Stack.Screen name="PackageDetail" component={PackageDetailScreen} />
+          <Stack.Screen name="LabelScanner" component={LabelScannerScreen} />
+          <Stack.Screen name="Profile" component={ProfileScreen} />
+        </Stack.Navigator>
+        <StatusBar style="auto" />
+      </NavigationContainer>
+    </PackageProvider>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
