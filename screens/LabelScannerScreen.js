@@ -33,8 +33,8 @@ import * as ImageManipulator from 'expo-image-manipulator';
 import { usePackages } from '../context/PackageContext';
 
 // ─── Configuración ────────────────────────────────────────────────────────────
-// Reemplazá con tu API key de Anthropic (console.anthropic.com)
-const ANTHROPIC_API_KEY = 'YOUR_ANTHROPIC_API_KEY_HERE';
+// Reemplazá con tu API key de Anthropic en un archivo .env
+const ANTHROPIC_API_KEY = process.env.EXPO_PUBLIC_ANTHROPIC_API_KEY;
 const COMPANIES = ['Flex', 'Falabella', 'Ripley', 'Varias'];
 
 const COMPANY_COLORS = {
