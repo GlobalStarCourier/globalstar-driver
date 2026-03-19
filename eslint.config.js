@@ -7,6 +7,16 @@ module.exports = defineConfig([
     ignores: ['node_modules/**', 'dist/**', 'web-build/**', '.expo/**', '.husky/_/**'],
   },
   {
+    settings: {
+      'import/resolver': {
+        alias: {
+          map: [['@', '.']],
+          extensions: ['.js', '.jsx', '.json'],
+        },
+      },
+    },
+  },
+  {
     languageOptions: {
       globals: {
         setTimeout: 'readonly',
