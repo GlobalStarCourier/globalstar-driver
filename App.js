@@ -10,6 +10,7 @@ import { AuthProvider, useAuth } from '@/context/AuthContext';
 import { PackageProvider } from '@/context/PackageContext';
 import DriverStackNavigator from '@/navigation/DriverStackNavigator';
 import LoginScreen from '@/screens/auth/LoginScreen';
+import PasswordChangeRequiredScreen from '@/screens/auth/PasswordChangeRequiredScreen';
 
 const RootStack = createNativeStackNavigator();
 
@@ -32,7 +33,7 @@ function DriverSessionNavigator() {
  * @returns {import('react').ReactElement} Root stack navigator.
  */
 function RootNavigator() {
-  const { isAuthenticated, isInitializing } = useAuth();
+  const { isAuthenticated, isInitializing, requiresPasswordChange } = useAuth();
 
   if (isInitializing) {
     return (
@@ -52,7 +53,14 @@ function RootNavigator() {
       }}
     >
       {isAuthenticated ? (
-        <RootStack.Screen name="DriverSession" component={DriverSessionNavigator} />
+        requiresPasswordChange ? (
+          <RootStack.Screen
+            name="PasswordChangeRequired"
+            component={PasswordChangeRequiredScreen}
+          />
+        ) : (
+          <RootStack.Screen name="DriverSession" component={DriverSessionNavigator} />
+        )
       ) : (
         <RootStack.Screen name="Login" component={LoginScreen} />
       )}

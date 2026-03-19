@@ -43,6 +43,8 @@ npm run web
 
 - La app ahora inicia con pantalla de acceso y solicita correo y contraseña del conductor.
 - Todas las vistas del flujo principal quedan protegidas hasta que el usuario inicie sesión.
+- Si el backend devuelve `password_set_required=true`, la app bloquea el flujo operativo y
+  exige actualizar la contraseña antes de ingresar al panel.
 
 ## Scripts de calidad
 
