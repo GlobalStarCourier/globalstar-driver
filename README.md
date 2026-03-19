@@ -45,6 +45,14 @@ npm run web
 - Todas las vistas del flujo principal quedan protegidas hasta que el usuario inicie sesión.
 - Si el backend devuelve `password_set_required=true`, la app bloquea el flujo operativo y
   exige actualizar la contraseña antes de ingresar al panel.
+- La sesión móvil envía `X-Client-Platform: MOBILE_DRIVER` para consumir solo
+  endpoints habilitados para la app de conductores.
+
+## Ruta asignada del conductor
+
+- El listado principal consume `GET /api/shipments/routes/mobile/assigned-orders/`.
+- La app deja de usar la API mock para viajes/asignaciones y muestra órdenes
+  reales asignadas al conductor autenticado.
 
 ## Scripts de calidad
 

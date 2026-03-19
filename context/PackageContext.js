@@ -1,157 +1,329 @@
-import React, { createContext, useState, useContext, useEffect } from 'react';
+import React, { createContext, useContext, useEffect, useState } from 'react';
 
-const PackageContext = createContext();
+import {
+  AUTH_API_BASE_URL,
+  MOBILE_CLIENT_PLATFORM_HEADER,
+  MOBILE_DRIVER_CLIENT_PLATFORM,
+  buildBackendEndpointUrl,
+} from '@/constants/AuthClient';
+import { useAuth } from '@/context/AuthContext';
 
-export const usePackages = () => useContext(PackageContext);
+const DRIVER_ASSIGNED_ORDERS_PATH = '/api/shipments/routes/mobile/assigned-orders/';
 
-const API_URL = 'https://api.mockapi.com/paquetes';
-const API_KEY = 'b347deaa5bb54da294e4d0c7b0b60464';
+/**
+ * @typedef {{
+ *   id: string,
+ *   orderId: string,
+ *   customerName: string,
+ *   address: string,
+ *   phone: string,
+ *   status: string,
+ *   trackingNumber: string,
+ *   pickupLocation: string,
+ *   sequence: number,
+ *   backendStatus: string,
+ *   completedAt?: string
+ * }} DriverPackage
+ */
 
-export const PackageProvider = ({ children }) => {
-    const [packages, setPackages] = useState([]);
-    const [loading, setLoading] = useState(true);
+/**
+ * @typedef {{
+ *   packages: DriverPackage[],
+ *   loading: boolean,
+ *   fetchPackages: () => Promise<void>,
+ *   updatePackageStatus: (id: string, status: string) => void,
+ *   updatePackagePhotos: (id: string, photos: Record<string, unknown>) => void,
+ *   addPackage: (newPackage: DriverPackage) => void
+ * }} PackageContextValue
+ */
 
-    const fetchPackages = async () => {
-        setLoading(true);
-        try {
-            const response = await fetch(API_URL, {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                    'x-api-key': API_KEY
-                }
-            });
-            const result = await response.json();
+const PackageContext = createContext(/** @type {PackageContextValue | null} */ (null));
 
-            const formatName = (name) => {
-                if (!name) return 'Cliente Desconocido';
-                return name
-                    .replace(/[_.]/g, ' ')
-                    .replace(/\d+/g, '')
-                    .split(' ')
-                    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-                    .join(' ')
-                    .trim();
-            };
+/**
+ * Access package context for driver-route screens.
+ *
+ * @returns {PackageContextValue} Package context value.
+ */
+export function usePackages() {
+  const contextValue = useContext(PackageContext);
+  if (!contextValue) {
+    throw new Error('usePackages must be used inside PackageProvider.');
+  }
+  return contextValue;
+}
 
-            // Map API structure to App structure
-            if (result && result.data) {
-                let mappedData = result.data.map((item, index) => ({
-                    id: item.id ? `${item.id}-${index}` : `pkg-${index}-${Date.now()}`,
-                    customerName: formatName(item.User),
-                    address: item.addres || 'Dirección no disponible', // Nota: el API usa "addres"
-                    phone: item.phone || '',
-                    status: item.status || 'pendiente',
-                    trackingNumber: item.id ? `REF: ${item.id}` : 'SIN ID',
-                    pickupLocation: 'Sede Central', // Placeholder ya que la API no lo trae
-                }));
+/**
+ * Provider that loads assigned driver orders from backend mobile endpoint.
+ *
+ * @param {{children: import('react').ReactNode}} props - Provider props.
+ * @returns {import('react').ReactElement} Package context provider.
+ */
+export function PackageProvider({ children }) {
+  const { accessToken, isAuthenticated, requiresPasswordChange } = useAuth();
+  const [packages, setPackages] = useState(/** @type {DriverPackage[]} */ ([]));
+  const [loading, setLoading] = useState(true);
 
-                // ===== DEMO: AGREGAR PAQUETES MULTIPLES =====
-                // Forzamos que la primera y segunda dirección tengan múltiples paquetes a retirar 
-                // para que puedas probar la funcionalidad de agrupación.
-                if (mappedData.length > 2) {
-                    const firstStop = mappedData[0];
-                    const secondStop = mappedData[1];
+  /**
+   * Fetch latest mobile-driver assigned orders and normalize them for UI screens.
+   */
+  async function fetchPackages() {
+    await loadAssignedPackages({
+      accessToken,
+      isAuthenticated,
+      requiresPasswordChange,
+      setPackages,
+      setLoading,
+    });
+  }
 
-                    // 2 paquetes extra para el primer cliente
-                    mappedData.push({
-                        ...firstStop,
-                        id: `demo-group-1a`,
-                        trackingNumber: `REF: ${firstStop.id}-A`
-                    });
-                    mappedData.push({
-                        ...firstStop,
-                        id: `demo-group-1b`,
-                        trackingNumber: `REF: ${firstStop.id}-B`
-                    });
+  useEffect(() => {
+    void loadAssignedPackages({
+      accessToken,
+      isAuthenticated,
+      requiresPasswordChange,
+      setPackages,
+      setLoading,
+    });
+  }, [accessToken, isAuthenticated, requiresPasswordChange]);
 
-                    // 1 paquete extra para el segundo cliente
-                    mappedData.push({
-                        ...secondStop,
-                        id: `demo-group-2a`,
-                        trackingNumber: `REF: ${secondStop.id}-A`
-                    });
-
-                    // ===== MOCK HISTORY DATA FOR PROFILE =====
-                    const today = new Date();
-                    const yesterday = new Date(today);
-                    yesterday.setDate(today.getDate() - 1);
-                    const twoDaysAgo = new Date(today);
-                    twoDaysAgo.setDate(today.getDate() - 2);
-
-                    // 2 Entregas ayer
-                    mappedData.push({
-                        id: 'hist-1',
-                        customerName: 'Juan Pérez',
-                        address: 'Av. Providencia 1234, Santiago',
-                        status: 'recogido',
-                        trackingNumber: 'REF: HIST-001',
-                        completedAt: yesterday.toISOString()
-                    });
-                    mappedData.push({
-                        id: 'hist-2',
-                        customerName: 'María García',
-                        address: 'Calle Larga 567, Las Condes',
-                        status: 'recogido',
-                        trackingNumber: 'REF: HIST-002',
-                        completedAt: yesterday.toISOString()
-                    });
-
-                    // 1 Entrega hace 2 días
-                    mappedData.push({
-                        id: 'hist-3',
-                        customerName: 'Roberto Soto',
-                        address: 'Pasaje El Olivo 88, Vitacura',
-                        status: 'recogido',
-                        trackingNumber: 'REF: HIST-003',
-                        completedAt: twoDaysAgo.toISOString()
-                    });
-                }
-                // ============================================
-
-                setPackages(mappedData);
+  /**
+   * Apply one local status transition for package UI interactions.
+   *
+   * @param {string} id - Package identifier.
+   * @param {string} status - New local status code.
+   */
+  function updatePackageStatus(id, status) {
+    setPackages((currentPackages) =>
+      currentPackages.map((currentPackage) =>
+        currentPackage.id === id
+          ? {
+              ...currentPackage,
+              status,
+              completedAt:
+                status === 'recogido' ? new Date().toISOString() : currentPackage.completedAt,
             }
-        } catch (error) {
-            console.error('Error fetching packages:', error);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    useEffect(() => {
-        fetchPackages();
-    }, []);
-
-    const updatePackageStatus = (id, status) => {
-        setPackages(prev => prev.map(pkg =>
-            pkg.id === id ? {
-                ...pkg,
-                status,
-                completedAt: status === 'recogido' ? new Date().toISOString() : pkg.completedAt
-            } : pkg
-        ));
-    };
-
-    const updatePackagePhotos = (id, photos) => {
-        setPackages(prev => prev.map(pkg =>
-            pkg.id === id ? { ...pkg, ...photos } : pkg
-        ));
-    };
-
-    const addPackage = (newPackage) => {
-        setPackages(prev => [...prev, newPackage]);
-    };
-
-    return (
-        <PackageContext.Provider value={{
-            packages,
-            loading,
-            fetchPackages,
-            updatePackageStatus,
-            updatePackagePhotos,
-            addPackage
-        }}>
-            {children}
-        </PackageContext.Provider>
+          : currentPackage,
+      ),
     );
-};
+  }
+
+  /**
+   * Attach local photo metadata to one package row.
+   *
+   * @param {string} id - Package identifier.
+   * @param {Record<string, unknown>} photos - Photo metadata map.
+   */
+  function updatePackagePhotos(id, photos) {
+    setPackages((currentPackages) =>
+      currentPackages.map((currentPackage) =>
+        currentPackage.id === id ? { ...currentPackage, ...photos } : currentPackage,
+      ),
+    );
+  }
+
+  /**
+   * Append one locally created package row.
+   *
+   * @param {DriverPackage} newPackage - Package row to append.
+   */
+  function addPackage(newPackage) {
+    setPackages((currentPackages) => [...currentPackages, newPackage]);
+  }
+
+  /** @type {PackageContextValue} */
+  const contextValue = {
+    packages,
+    loading,
+    fetchPackages,
+    updatePackageStatus,
+    updatePackagePhotos,
+    addPackage,
+  };
+
+  return <PackageContext.Provider value={contextValue}>{children}</PackageContext.Provider>;
+}
+
+/**
+ * Load assigned packages into provider state according to auth/session flags.
+ *
+ * @param {{
+ *   accessToken: string,
+ *   isAuthenticated: boolean,
+ *   requiresPasswordChange: boolean,
+ *   setPackages: React.Dispatch<React.SetStateAction<DriverPackage[]>>,
+ *   setLoading: React.Dispatch<React.SetStateAction<boolean>>
+ * }} params - Provider-state setters and auth state.
+ */
+async function loadAssignedPackages({
+  accessToken,
+  isAuthenticated,
+  requiresPasswordChange,
+  setPackages,
+  setLoading,
+}) {
+  if (!AUTH_API_BASE_URL || !isAuthenticated || !accessToken || requiresPasswordChange) {
+    setPackages([]);
+    setLoading(false);
+    return;
+  }
+
+  setLoading(true);
+  try {
+    const assignedOrdersPayload = await requestDriverAssignedOrders({
+      accessToken,
+    });
+    const normalizedPackages = mapAssignedOrdersToPackages(
+      assignedOrdersPayload?.['assigned_orders'],
+    );
+    setPackages(normalizedPackages);
+  } catch (_error) {
+    setPackages([]);
+  } finally {
+    setLoading(false);
+  }
+}
+
+/**
+ * Request one backend endpoint that returns assigned mobile-driver orders.
+ *
+ * @param {{accessToken: string}} params - Auth request params.
+ * @returns {Promise<any>} Backend response payload.
+ */
+async function requestDriverAssignedOrders({ accessToken }) {
+  const response = await fetch(buildBackendEndpointUrl(DRIVER_ASSIGNED_ORDERS_PATH), {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+      [MOBILE_CLIENT_PLATFORM_HEADER]: MOBILE_DRIVER_CLIENT_PLATFORM,
+    },
+  });
+
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(extractFirstApiErrorMessage(payload) || 'No se pudo cargar la ruta asignada.');
+  }
+
+  return payload;
+}
+
+/**
+ * Convert API assignments into the package rows expected by existing screens.
+ *
+ * @param {any} assignedOrdersCandidate - Raw assigned-orders payload.
+ * @returns {DriverPackage[]} Normalized package list.
+ */
+/**
+ * @typedef {{
+ *   order_id?: unknown,
+ *   receiver_name?: unknown,
+ *   receiver_phone?: unknown,
+ *   order_code?: unknown,
+ *   address_type?: unknown,
+ *   address?: unknown,
+ *   status?: unknown,
+ *   created_at?: unknown,
+ *   requested_at?: unknown,
+ *   sequence?: unknown
+ * }} RawAssignedOrder
+ */
+function mapAssignedOrdersToPackages(assignedOrdersCandidate) {
+  if (!Array.isArray(assignedOrdersCandidate)) {
+    return [];
+  }
+
+  const mappedPackages = assignedOrdersCandidate.map((rawOrder, index) => {
+    const safeRawOrder =
+      rawOrder && typeof rawOrder === 'object' ? /** @type {RawAssignedOrder} */ (rawOrder) : {};
+    const {
+      status: backendStatusCandidate,
+      created_at: createdAtRaw,
+      requested_at: requestedAtRaw,
+      order_id: orderIdRaw,
+      receiver_name: receiverNameRaw,
+      address: addressRaw,
+      receiver_phone: receiverPhoneRaw,
+      order_code: orderCodeRaw,
+      address_type: addressTypeRaw,
+      sequence: sequenceRaw,
+    } = safeRawOrder;
+
+    const mappedStatus = mapBackendStatusToPackageStatus(backendStatusCandidate);
+    const completedAt =
+      mappedStatus === 'recogido' || mappedStatus === 'entregado' || mappedStatus === 'rechazado'
+        ? String(createdAtRaw ?? requestedAtRaw ?? new Date().toISOString())
+        : undefined;
+
+    return {
+      id: String(orderIdRaw ?? `order-${index}`),
+      orderId: String(orderIdRaw ?? ''),
+      customerName: String(receiverNameRaw ?? 'Cliente'),
+      address: String(addressRaw ?? 'Dirección no disponible'),
+      phone: String(receiverPhoneRaw ?? ''),
+      status: mappedStatus,
+      trackingNumber: String(orderCodeRaw ?? `ORD-${index + 1}`),
+      pickupLocation: String(addressTypeRaw ?? ''),
+      sequence: Number(sequenceRaw ?? index + 1),
+      backendStatus: String(backendStatusCandidate ?? ''),
+      completedAt,
+    };
+  });
+
+  return mappedPackages.sort((leftOrder, rightOrder) => leftOrder.sequence - rightOrder.sequence);
+}
+
+/**
+ * Normalize backend shipment statuses into existing mobile status tabs.
+ *
+ * @param {unknown} backendStatusCandidate - Raw backend status code.
+ * @returns {string} Mobile status code.
+ */
+function mapBackendStatusToPackageStatus(backendStatusCandidate) {
+  const backendStatus = String(backendStatusCandidate ?? '')
+    .trim()
+    .toUpperCase();
+
+  if (backendStatus === 'RETIRADO') {
+    return 'recogido';
+  }
+  if (backendStatus === 'EN_BODEGA') {
+    return 'distribucion';
+  }
+  if (backendStatus === 'EN_RUTA') {
+    return 'ruta';
+  }
+  if (backendStatus === 'ENTREGADO') {
+    return 'entregado';
+  }
+  if (backendStatus === 'INCIDENCIA' || backendStatus === 'CANCELADO') {
+    return 'rechazado';
+  }
+  return 'pendiente';
+}
+
+/**
+ * Extract one readable message from API payloads.
+ *
+ * @param {any} payloadCandidate - Raw backend payload.
+ * @returns {string} First available API message.
+ */
+function extractFirstApiErrorMessage(payloadCandidate) {
+  if (!payloadCandidate || typeof payloadCandidate !== 'object') {
+    return '';
+  }
+  if (typeof payloadCandidate.detail === 'string' && payloadCandidate.detail.trim()) {
+    return payloadCandidate.detail.trim();
+  }
+
+  for (const value of Object.values(payloadCandidate)) {
+    if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'string') {
+      return value[0].trim();
+    }
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return '';
+}

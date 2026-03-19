@@ -1,9 +1,14 @@
 import React, { createContext, useContext, useState } from 'react';
+import {
+  AUTH_API_BASE_URL,
+  MOBILE_CLIENT_PLATFORM_HEADER,
+  MOBILE_DRIVER_CLIENT_PLATFORM,
+  buildBackendEndpointUrl,
+} from '@/constants/AuthClient';
 
 const DRIVER_ROLE = 'DRIVER';
 const DEFAULT_DEMO_EMAIL = 'conductor@globalstar.cl';
 const DEFAULT_DEMO_PASSWORD = '123456';
-const AUTH_API_BASE_URL = String(process.env.EXPO_PUBLIC_AUTH_API_BASE_URL ?? '').trim();
 
 /**
  * @typedef {{
@@ -360,9 +365,10 @@ async function requestAuthApi({
   unauthorizedErrorMessage,
   fallbackErrorMessage,
 }) {
-  const endpoint = buildAuthEndpointUrl(path);
+  const endpoint = buildBackendEndpointUrl(path);
   const headers = {
     Accept: 'application/json',
+    [MOBILE_CLIENT_PLATFORM_HEADER]: MOBILE_DRIVER_CLIENT_PLATFORM,
   };
 
   if (body) {
@@ -391,17 +397,6 @@ async function requestAuthApi({
   }
 
   return payload;
-}
-
-/**
- * Build absolute auth endpoint URL from environment base URL.
- *
- * @param {string} path - API path with leading slash.
- * @returns {string} Full URL to backend endpoint.
- */
-function buildAuthEndpointUrl(path) {
-  const normalizedBaseUrl = AUTH_API_BASE_URL.replace(/\/+$/, '');
-  return `${normalizedBaseUrl}${path}`;
 }
 
 /**
