@@ -1,0 +1,7 @@
+node_modules/
+dist/
+web-build/
+coverage/
+.expo/
+.husky/_/
+package-lock.json

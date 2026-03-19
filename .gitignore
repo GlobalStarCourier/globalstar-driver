@@ -1,42 +1,114 @@
-# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
-
-# dependencies
+# -----------------------------------------------------------------------------
+# Dependencies
+# -----------------------------------------------------------------------------
 node_modules/
+jspm_packages/
+bower_components/
 
-# Expo
+# Package manager local caches
+.npm/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+# -----------------------------------------------------------------------------
+# Expo / React Native (managed workflow)
+# -----------------------------------------------------------------------------
 .expo/
+.expo-shared/
+expo-env.d.ts
 dist/
 web-build/
-expo-env.d.ts
-
-# Native
 .kotlin/
-*.orig.*
+
+# Generated native folders (Expo prebuild artifacts)
+/ios
+/android
+
+# Metro / bundler diagnostics
+.metro-health-check*
+
+# -----------------------------------------------------------------------------
+# Environment and secrets
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.*.example
+.envrc
+.direnv/
+
+# Native signing and sensitive key material
 *.jks
+*.keystore
 *.p8
 *.p12
 *.key
 *.mobileprovision
-
-# Metro
-.metro-health-check*
-
-# debug
-npm-debug.*
-yarn-debug.*
-yarn-error.*
-
-# macOS
-.DS_Store
 *.pem
 
-# local env files
-.env
-.env*.local
+# -----------------------------------------------------------------------------
+# Testing and reports
+# -----------------------------------------------------------------------------
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+junit.xml
 
-# typescript
+# -----------------------------------------------------------------------------
+# Logs, caches and temp files
+# -----------------------------------------------------------------------------
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+.cache/
+.eslintcache
+.stylelintcache
+tmp/
+temp/
+.tmp/
+*.tmp
+*.swp
+*.swo
+
+# -----------------------------------------------------------------------------
+# OS-generated files (multi-OS)
+# -----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.Spotlight-V100/
+.Trashes/
+._*
+
+# -----------------------------------------------------------------------------
+# Editor / IDE
+# -----------------------------------------------------------------------------
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.iml
+.husky/_/
+
+# -----------------------------------------------------------------------------
+# TypeScript / patch leftovers
+# -----------------------------------------------------------------------------
 *.tsbuildinfo
+*.orig
+*.orig.*
+*.rej
 
-# generated native folders
-/ios
-/android
+# -----------------------------------------------------------------------------
+# Local AI assistant artifacts
+# -----------------------------------------------------------------------------
+.aiassistant/
+.aiignore
