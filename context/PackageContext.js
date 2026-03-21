@@ -9,6 +9,7 @@ import {
 import { useAuth } from '@/context/AuthContext';
 
 const DRIVER_ASSIGNED_ORDERS_PATH = '/api/shipments/routes/mobile/assigned-orders/';
+const DRIVER_PACKAGE_SCAN_PATH = '/api/shipments/routes/mobile/extra-package/scan/';
 
 /**
  * @typedef {{
@@ -22,6 +23,7 @@ const DRIVER_ASSIGNED_ORDERS_PATH = '/api/shipments/routes/mobile/assigned-order
  *   pickupLocation: string,
  *   sequence: number,
  *   backendStatus: string,
+ *   photoUri?: string,
  *   completedAt?: string
  * }} DriverPackage
  */
@@ -31,6 +33,11 @@ const DRIVER_ASSIGNED_ORDERS_PATH = '/api/shipments/routes/mobile/assigned-order
  *   packages: DriverPackage[],
  *   loading: boolean,
  *   fetchPackages: () => Promise<void>,
+ *   scanPackageQr: (params: {
+ *     qrPayload: string,
+ *     scanMode: 'ASSIGNED_PICKUP' | 'EXTRA_PICKUP',
+ *     sourceOrderId?: string | null
+ *   }) => Promise<Record<string, unknown>>,
  *   updatePackageStatus: (id: string, status: string) => void,
  *   updatePackagePhotos: (id: string, photos: Record<string, unknown>) => void,
  *   addPackage: (newPackage: DriverPackage) => void
@@ -74,6 +81,35 @@ export function PackageProvider({ children }) {
       setPackages,
       setLoading,
     });
+  }
+
+  /**
+   * Scan one package QR through backend and refresh assigned orders in state.
+   *
+   * @param {{
+   *   qrPayload: string,
+   *   scanMode: 'ASSIGNED_PICKUP' | 'EXTRA_PICKUP',
+   *   sourceOrderId?: string | null
+   * }} params - Scan request payload.
+   * @returns {Promise<Record<string, unknown>>} Scan response payload.
+   */
+  async function scanPackageQr({ qrPayload, scanMode, sourceOrderId = null }) {
+    if (!AUTH_API_BASE_URL || !isAuthenticated || !accessToken || requiresPasswordChange) {
+      throw new Error('Debes iniciar sesión para escanear paquetes.');
+    }
+
+    const scanPayload = await requestDriverPackageScan({
+      accessToken,
+      qrPayload,
+      scanMode,
+      sourceOrderId,
+    });
+    const assignedOrdersPayload = await requestDriverAssignedOrders({ accessToken });
+    const normalizedPackages = mapAssignedOrdersToPackages(
+      assignedOrdersPayload?.['assigned_orders'],
+    );
+    setPackages(normalizedPackages);
+    return scanPayload;
   }
 
   useEffect(() => {
@@ -135,6 +171,7 @@ export function PackageProvider({ children }) {
     packages,
     loading,
     fetchPackages,
+    scanPackageQr,
     updatePackageStatus,
     updatePackagePhotos,
     addPackage,
@@ -205,6 +242,52 @@ async function requestDriverAssignedOrders({ accessToken }) {
     throw new Error(extractFirstApiErrorMessage(payload) || 'No se pudo cargar la ruta asignada.');
   }
 
+  return payload;
+}
+
+/**
+ * Send one package scan request to backend mobile QR endpoint.
+ *
+ * @param {{
+ *   accessToken: string,
+ *   qrPayload: string,
+ *   scanMode: 'ASSIGNED_PICKUP' | 'EXTRA_PICKUP',
+ *   sourceOrderId?: string | null
+ * }} params - Scan request params.
+ * @returns {Promise<Record<string, unknown>>} Scan response payload.
+ */
+async function requestDriverPackageScan({
+  accessToken,
+  qrPayload,
+  scanMode,
+  sourceOrderId = null,
+}) {
+  const requestPayload = {
+    qr_payload: String(qrPayload ?? '').trim(),
+    scan_mode: String(scanMode ?? '').trim(),
+    ...(sourceOrderId ? { source_order_id: String(sourceOrderId).trim() } : {}),
+  };
+  const response = await fetch(buildBackendEndpointUrl(DRIVER_PACKAGE_SCAN_PATH), {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+      [MOBILE_CLIENT_PLATFORM_HEADER]: MOBILE_DRIVER_CLIENT_PLATFORM,
+    },
+    body: JSON.stringify(requestPayload),
+  });
+
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(
+      extractFirstApiErrorMessage(payload) || 'No se pudo registrar el escaneo del paquete.',
+    );
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    return {};
+  }
   return payload;
 }
 
