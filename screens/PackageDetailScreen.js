@@ -29,6 +29,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { usePackages } from '@/context/PackageContext';
 import PackageTrackingIndicator from '@/components/package/PackageTrackingIndicator';
 import { capturePackagePhoto } from '@/utils/capturePackagePhoto';
+import { ensureScanMatchesTargetOrder, resolveScannedOrderId } from '@/utils/driverScanValidation';
 
 export default function PackageDetailScreen({ route, navigation }) {
   const { packageId } = route.params;
@@ -101,12 +102,17 @@ export default function PackageDetailScreen({ route, navigation }) {
     setScanningPkgId(null);
 
     try {
-      await scanPackageQr({
+      const scanResponse = await scanPackageQr({
         qrPayload: data,
         scanMode: 'ASSIGNED_PICKUP',
         sourceOrderId: pkg.orderId || null,
       });
-      setScans((prev) => ({ ...prev, [targetPackageId]: true }));
+      const scannedOrderId = ensureScanMatchesTargetOrder({
+        scanPayloadCandidate: scanResponse,
+        targetOrderId: targetPackageId,
+      });
+      setScans((prev) => ({ ...prev, [scannedOrderId]: true }));
+      updatePackageStatus(scannedOrderId, 'recogido');
     } catch (error) {
       Alert.alert(
         'Escaneo inválido',
@@ -128,9 +134,10 @@ export default function PackageDetailScreen({ route, navigation }) {
         scanMode: 'EXTRA_PICKUP',
         sourceOrderId: pkg.orderId || null,
       });
-      const scannedOrderId = String(scanResponse?.order_id ?? '').trim();
+      const scannedOrderId = resolveScannedOrderId(scanResponse);
       if (scannedOrderId) {
         setScans((prev) => ({ ...prev, [scannedOrderId]: true }));
+        updatePackageStatus(scannedOrderId, 'recogido');
       }
       Alert.alert('Paquete extra agregado', 'El paquete fue asignado y marcado como retirado.');
     } catch (error) {
@@ -326,18 +333,19 @@ export default function PackageDetailScreen({ route, navigation }) {
           <View style={styles.pickedUpOverlayContainer}>
             <CheckCircle color="#059669" size={64} style={{ marginBottom: 16 }} />
             <Text style={styles.pickedUpTextTitle}>Paquete Retirado</Text>
-            <Text style={styles.pickedUpTextSubtitle}>Este paquete ya ha sido procesado</Text>
+            <Text style={styles.pickedUpTextSubtitle}>
+              Puedes seguir agregando paquetes extra desde el botón inferior.
+            </Text>
           </View>
         )}
       </ScrollView>
 
-      {!isPickedUp && (
-        <View style={styles.fixedButtonsContainer}>
-          <TouchableOpacity style={styles.addExtraFooterButton} onPress={handleAddExtraPackage}>
-            <PlusCircle color="#000" size={20} />
-            <Text style={styles.addExtraFooterButtonText}>AGREGAR PAQUETE EXTRA</Text>
-          </TouchableOpacity>
-
+      <View style={styles.fixedButtonsContainer}>
+        <TouchableOpacity style={styles.addExtraFooterButton} onPress={handleAddExtraPackage}>
+          <PlusCircle color="#000" size={20} />
+          <Text style={styles.addExtraFooterButtonText}>AGREGAR PAQUETE EXTRA</Text>
+        </TouchableOpacity>
+        {!isPickedUp && (
           <TouchableOpacity
             style={[
               styles.mainButton,
@@ -354,8 +362,8 @@ export default function PackageDetailScreen({ route, navigation }) {
               {allProcessed ? 'FINALIZAR RETIRO' : 'PROCESAR PAQUETES'}
             </Text>
           </TouchableOpacity>
-        </View>
-      )}
+        )}
+      </View>
 
       {/* Modal Scanner */}
       <Modal

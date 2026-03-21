@@ -66,7 +66,7 @@ export function usePackages() {
  * @returns {import('react').ReactElement} Package context provider.
  */
 export function PackageProvider({ children }) {
-  const { accessToken, isAuthenticated, requiresPasswordChange } = useAuth();
+  const { accessToken, isAuthenticated, requiresPasswordChange, refreshAccessToken } = useAuth();
   const [packages, setPackages] = useState(/** @type {DriverPackage[]} */ ([]));
   const [loading, setLoading] = useState(true);
 
@@ -78,6 +78,7 @@ export function PackageProvider({ children }) {
       accessToken,
       isAuthenticated,
       requiresPasswordChange,
+      refreshAccessToken,
       setPackages,
       setLoading,
     });
@@ -100,11 +101,15 @@ export function PackageProvider({ children }) {
 
     const scanPayload = await requestDriverPackageScan({
       accessToken,
+      refreshAccessToken,
       qrPayload,
       scanMode,
       sourceOrderId,
     });
-    const assignedOrdersPayload = await requestDriverAssignedOrders({ accessToken });
+    const assignedOrdersPayload = await requestDriverAssignedOrders({
+      accessToken,
+      refreshAccessToken,
+    });
     const normalizedPackages = mapAssignedOrdersToPackages(
       assignedOrdersPayload?.['assigned_orders'],
     );
@@ -117,10 +122,11 @@ export function PackageProvider({ children }) {
       accessToken,
       isAuthenticated,
       requiresPasswordChange,
+      refreshAccessToken,
       setPackages,
       setLoading,
     });
-  }, [accessToken, isAuthenticated, requiresPasswordChange]);
+  }, [accessToken, isAuthenticated, requiresPasswordChange, refreshAccessToken]);
 
   /**
    * Apply one local status transition for package UI interactions.
@@ -187,6 +193,7 @@ export function PackageProvider({ children }) {
  *   accessToken: string,
  *   isAuthenticated: boolean,
  *   requiresPasswordChange: boolean,
+ *   refreshAccessToken: () => Promise<string>,
  *   setPackages: React.Dispatch<React.SetStateAction<DriverPackage[]>>,
  *   setLoading: React.Dispatch<React.SetStateAction<boolean>>
  * }} params - Provider-state setters and auth state.
@@ -195,6 +202,7 @@ async function loadAssignedPackages({
   accessToken,
   isAuthenticated,
   requiresPasswordChange,
+  refreshAccessToken,
   setPackages,
   setLoading,
 }) {
@@ -208,13 +216,15 @@ async function loadAssignedPackages({
   try {
     const assignedOrdersPayload = await requestDriverAssignedOrders({
       accessToken,
+      refreshAccessToken,
     });
     const normalizedPackages = mapAssignedOrdersToPackages(
       assignedOrdersPayload?.['assigned_orders'],
     );
     setPackages(normalizedPackages);
   } catch (_error) {
-    setPackages([]);
+    // Keep the latest known package list on transient refresh failures.
+    // This prevents the UI from showing a false "Ruta completada" state.
   } finally {
     setLoading(false);
   }
@@ -223,18 +233,18 @@ async function loadAssignedPackages({
 /**
  * Request one backend endpoint that returns assigned mobile-driver orders.
  *
- * @param {{accessToken: string}} params - Auth request params.
+ * @param {{
+ *   accessToken: string,
+ *   refreshAccessToken: () => Promise<string>
+ * }} params - Auth request params.
  * @returns {Promise<any>} Backend response payload.
  */
-async function requestDriverAssignedOrders({ accessToken }) {
-  const response = await fetch(buildBackendEndpointUrl(DRIVER_ASSIGNED_ORDERS_PATH), {
+async function requestDriverAssignedOrders({ accessToken, refreshAccessToken }) {
+  const response = await requestDriverAuthenticatedEndpoint({
+    path: DRIVER_ASSIGNED_ORDERS_PATH,
     method: 'GET',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
-      [MOBILE_CLIENT_PLATFORM_HEADER]: MOBILE_DRIVER_CLIENT_PLATFORM,
-    },
+    accessToken,
+    refreshAccessToken,
   });
 
   const payload = await response.json().catch(() => null);
@@ -250,6 +260,7 @@ async function requestDriverAssignedOrders({ accessToken }) {
  *
  * @param {{
  *   accessToken: string,
+ *   refreshAccessToken: () => Promise<string>,
  *   qrPayload: string,
  *   scanMode: 'ASSIGNED_PICKUP' | 'EXTRA_PICKUP',
  *   sourceOrderId?: string | null
@@ -258,6 +269,7 @@ async function requestDriverAssignedOrders({ accessToken }) {
  */
 async function requestDriverPackageScan({
   accessToken,
+  refreshAccessToken,
   qrPayload,
   scanMode,
   sourceOrderId = null,
@@ -267,14 +279,11 @@ async function requestDriverPackageScan({
     scan_mode: String(scanMode ?? '').trim(),
     ...(sourceOrderId ? { source_order_id: String(sourceOrderId).trim() } : {}),
   };
-  const response = await fetch(buildBackendEndpointUrl(DRIVER_PACKAGE_SCAN_PATH), {
+  const response = await requestDriverAuthenticatedEndpoint({
+    path: DRIVER_PACKAGE_SCAN_PATH,
     method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
-      [MOBILE_CLIENT_PLATFORM_HEADER]: MOBILE_DRIVER_CLIENT_PLATFORM,
-    },
+    accessToken,
+    refreshAccessToken,
     body: JSON.stringify(requestPayload),
   });
 
@@ -289,6 +298,48 @@ async function requestDriverPackageScan({
     return {};
   }
   return payload;
+}
+
+/**
+ * Send one authenticated mobile request and retry once after session refresh on 401.
+ *
+ * @param {{
+ *   path: string,
+ *   method: 'GET' | 'POST',
+ *   accessToken: string,
+ *   refreshAccessToken: () => Promise<string>,
+ *   body?: string
+ * }} params - Authenticated request params.
+ * @returns {Promise<Response>} Fetch response object.
+ */
+async function requestDriverAuthenticatedEndpoint({
+  path,
+  method,
+  accessToken,
+  refreshAccessToken,
+  body,
+}) {
+  const endpoint = buildBackendEndpointUrl(path);
+  const buildRequestOptions = (token) => ({
+    method,
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      [MOBILE_CLIENT_PLATFORM_HEADER]: MOBILE_DRIVER_CLIENT_PLATFORM,
+    },
+    credentials: 'include',
+    body,
+  });
+
+  let response = await fetch(endpoint, buildRequestOptions(accessToken));
+  if (response.status !== 401) {
+    return response;
+  }
+
+  const refreshedAccessToken = await refreshAccessToken();
+  response = await fetch(endpoint, buildRequestOptions(refreshedAccessToken));
+  return response;
 }
 
 /**

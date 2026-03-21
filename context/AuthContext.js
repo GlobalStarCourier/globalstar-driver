@@ -7,8 +7,8 @@ import {
 } from '@/constants/AuthClient';
 
 const DRIVER_ROLE = 'DRIVER';
-const DEFAULT_DEMO_EMAIL = 'conductor@globalstar.cl';
-const DEFAULT_DEMO_PASSWORD = '123456';
+const MISSING_AUTH_API_BASE_URL_ERROR_MESSAGE =
+  'Configuración faltante: define EXPO_PUBLIC_AUTH_API_BASE_URL para usar esta app.';
 
 /**
  * @typedef {{
@@ -41,6 +41,7 @@ const DEFAULT_DEMO_PASSWORD = '123456';
  *   isInitializing: boolean,
  *   isSubmitting: boolean,
  *   login: (credentials: {email: string, password: string}) => Promise<AuthUser>,
+ *   refreshAccessToken: () => Promise<string>,
  *   changePassword: (payload: {
  *     currentPassword: string,
  *     newPassword: string,
@@ -85,15 +86,14 @@ export function AuthProvider({ children }) {
     if (!normalizedEmail || !normalizedPassword) {
       throw new Error('Debes ingresar correo y contraseña.');
     }
+    assertAuthApiBaseUrlConfigured();
 
     setIsSubmitting(true);
     try {
-      const payload = AUTH_API_BASE_URL
-        ? await loginWithApi({ email: normalizedEmail, password: normalizedPassword })
-        : await loginWithDemoCredentials({
-            email: normalizedEmail,
-            password: normalizedPassword,
-          });
+      const payload = await loginWithApi({
+        email: normalizedEmail,
+        password: normalizedPassword,
+      });
 
       setAuthState({
         status: 'authenticated',
@@ -119,6 +119,51 @@ export function AuthProvider({ children }) {
   }
 
   /**
+   * Renew short-lived access token from refresh-cookie session.
+   *
+   * @returns {Promise<string>} Fresh access token.
+   */
+  async function refreshAccessToken() {
+    if (!authState.user || authState.status !== 'authenticated') {
+      throw new Error('No hay una sesión activa para renovar.');
+    }
+
+    assertAuthApiBaseUrlConfigured();
+
+    /** @type {any} */
+    let refreshPayload;
+    try {
+      refreshPayload = await requestAuthApi({
+        path: '/api/auth/refresh/',
+        method: 'POST',
+        unauthorizedErrorMessage: 'Tu sesión expiró. Inicia sesión nuevamente.',
+        fallbackErrorMessage: 'No se pudo renovar la sesión.',
+      });
+    } catch (error) {
+      setAuthState(defaultAuthState);
+      throw error;
+    }
+
+    const nextAccessToken = String(refreshPayload?.['access_token'] ?? '').trim();
+    if (!nextAccessToken) {
+      setAuthState(defaultAuthState);
+      throw new Error('No se pudo renovar la sesión.');
+    }
+
+    setAuthState((currentAuthState) => {
+      if (currentAuthState.status !== 'authenticated' || !currentAuthState.user) {
+        return currentAuthState;
+      }
+      return {
+        ...currentAuthState,
+        accessToken: nextAccessToken,
+      };
+    });
+
+    return nextAccessToken;
+  }
+
+  /**
    * Rotate password for an authenticated driver who must update credentials.
    *
    * @param {{
@@ -138,23 +183,16 @@ export function AuthProvider({ children }) {
     if (!currentPassword || !newPassword || !newPasswordConfirm) {
       throw new Error('Debes completar todos los campos de contraseña.');
     }
+    assertAuthApiBaseUrlConfigured();
 
     setIsSubmitting(true);
     try {
-      if (AUTH_API_BASE_URL) {
-        await changePasswordWithApi({
-          accessToken: authState.accessToken,
-          currentPassword,
-          newPassword,
-          newPasswordConfirm,
-        });
-      } else {
-        await changePasswordWithDemoSession({
-          currentPassword,
-          newPassword,
-          newPasswordConfirm,
-        });
-      }
+      await changePasswordWithApi({
+        accessToken: authState.accessToken,
+        currentPassword,
+        newPassword,
+        newPasswordConfirm,
+      });
 
       setAuthState(
         /**
@@ -197,6 +235,7 @@ export function AuthProvider({ children }) {
     isInitializing: false,
     isSubmitting,
     login,
+    refreshAccessToken,
     changePassword,
     logout,
   };
@@ -288,63 +327,6 @@ async function changePasswordWithApi({
 }
 
 /**
- * Authenticate using local demo credentials when backend URL is not configured.
- *
- * @param {{email: string, password: string}} params - Driver credentials.
- * @returns {Promise<{accessToken: string, user: AuthUser}>} Session payload.
- */
-async function loginWithDemoCredentials({ email, password }) {
-  const demoEmail = String(process.env.EXPO_PUBLIC_DRIVER_DEMO_EMAIL ?? DEFAULT_DEMO_EMAIL)
-    .trim()
-    .toLowerCase();
-  const demoPassword = String(
-    process.env.EXPO_PUBLIC_DRIVER_DEMO_PASSWORD ?? DEFAULT_DEMO_PASSWORD,
-  ).trim();
-
-  if (email !== demoEmail || password !== demoPassword) {
-    throw new Error('Credenciales inválidas. Revisa el correo y la contraseña.');
-  }
-
-  return {
-    accessToken: 'demo-driver-session-token',
-    user: normalizeUserPayload(
-      {
-        id: 'demo-driver',
-        name: 'Conductor Demo',
-        email: demoEmail,
-        role: DRIVER_ROLE,
-      },
-      demoEmail,
-    ),
-  };
-}
-
-/**
- * Apply local password-change rules for demo sessions without backend.
- *
- * @param {{
- *   currentPassword: string,
- *   newPassword: string,
- *   newPasswordConfirm: string
- * }} params - Password change payload.
- */
-async function changePasswordWithDemoSession({ currentPassword, newPassword, newPasswordConfirm }) {
-  const demoPassword = String(
-    process.env.EXPO_PUBLIC_DRIVER_DEMO_PASSWORD ?? DEFAULT_DEMO_PASSWORD,
-  ).trim();
-
-  if (currentPassword !== demoPassword) {
-    throw new Error('La contraseña actual es incorrecta.');
-  }
-  if (newPassword !== newPasswordConfirm) {
-    throw new Error('La confirmación de la nueva contraseña no coincide.');
-  }
-  if (newPassword.length < 10) {
-    throw new Error('La nueva contraseña debe tener al menos 10 caracteres.');
-  }
-}
-
-/**
  * Request one auth endpoint and normalize server-side error messages.
  *
  * @param {{
@@ -365,6 +347,7 @@ async function requestAuthApi({
   unauthorizedErrorMessage,
   fallbackErrorMessage,
 }) {
+  assertAuthApiBaseUrlConfigured();
   const endpoint = buildBackendEndpointUrl(path);
   const headers = {
     Accept: 'application/json',
@@ -382,6 +365,7 @@ async function requestAuthApi({
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
+    credentials: 'include',
   });
 
   const payload = await response.json().catch(() => null);
@@ -397,6 +381,17 @@ async function requestAuthApi({
   }
 
   return payload;
+}
+
+/**
+ * Enforce backend auth base URL presence before issuing auth requests.
+ *
+ * @throws {Error} When auth API base URL is missing.
+ */
+function assertAuthApiBaseUrlConfigured() {
+  if (!AUTH_API_BASE_URL) {
+    throw new Error(MISSING_AUTH_API_BASE_URL_ERROR_MESSAGE);
+  }
 }
 
 /**

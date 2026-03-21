@@ -43,6 +43,7 @@ Current tests do not rely on real camera, gallery, or location hardware state.
 - Structure by feature surface:
   - `__tests__/screens/...`
   - `__tests__/components/...`
+  - `__tests__/context/...`
 
 ## Current Suite Coverage
 
@@ -50,3 +51,5 @@ Current tests do not rely on real camera, gallery, or location hardware state.
 - `PasswordChangeRequiredScreen`: password-change submit contract, fallback error, disabled logout during submit.
 - `AppInput`: label/error/icons rendering, text change propagation, non-editable state.
 - `AppButton`: press behavior, loading state, disabled state.
+- `driverScanValidation`: strict scan-response guards so QR scans only apply to the selected assigned order row.
+- `PackageContext`: refresh regression guard so failed assigned-orders refresh keeps the last valid route list, plus `401` retry flow that refreshes mobile session token before re-requesting assigned orders.

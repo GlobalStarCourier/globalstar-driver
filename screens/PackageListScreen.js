@@ -37,6 +37,7 @@ import { usePackages } from '@/context/PackageContext';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import PackageTrackingIndicator from '@/components/package/PackageTrackingIndicator';
 import { capturePackagePhoto } from '@/utils/capturePackagePhoto';
+import { ensureScanMatchesTargetOrder, resolveScannedOrderId } from '@/utils/driverScanValidation';
 
 export default function PackageListScreen({ navigation }) {
   const { packages, loading, fetchPackages, updatePackageStatus, scanPackageQr } = usePackages();
@@ -148,12 +149,17 @@ export default function PackageListScreen({ navigation }) {
 
     void (async () => {
       try {
-        await scanPackageQr({
+        const scanResponse = await scanPackageQr({
           qrPayload: data,
           scanMode: 'ASSIGNED_PICKUP',
           sourceOrderId: scannedPackage?.orderId || null,
         });
-        setScans((prev) => ({ ...prev, [targetPackageId]: true }));
+        const scannedOrderId = ensureScanMatchesTargetOrder({
+          scanPayloadCandidate: scanResponse,
+          targetOrderId: targetPackageId,
+        });
+        setScans((prev) => ({ ...prev, [scannedOrderId]: true }));
+        updatePackageStatus(scannedOrderId, 'recogido');
       } catch (error) {
         Alert.alert(
           'Escaneo inválido',
@@ -177,9 +183,10 @@ export default function PackageListScreen({ navigation }) {
           scanMode: 'EXTRA_PICKUP',
           sourceOrderId: scannedPackage?.orderId || null,
         });
-        const scannedOrderId = String(scanResponse?.order_id ?? '').trim();
+        const scannedOrderId = resolveScannedOrderId(scanResponse);
         if (scannedOrderId) {
           setScans((prev) => ({ ...prev, [scannedOrderId]: true }));
+          updatePackageStatus(scannedOrderId, 'recogido');
         }
         Alert.alert('Paquete extra agregado', 'El paquete fue asignado y marcado como retirado.');
       } catch (error) {
@@ -253,7 +260,7 @@ export default function PackageListScreen({ navigation }) {
   /**
    * Render one stop card row inside the route list.
    *
-   * @type {import('react-native').ListRenderItem<any>}
+   * @type {NonNullable<React.ComponentProps<typeof FlatList>['renderItem']>}
    */
   const renderItem = ({ item }) => {
     const isPickedUp = item.status === 'recogido';
