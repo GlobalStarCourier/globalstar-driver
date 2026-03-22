@@ -551,7 +551,9 @@ export default function PackageListScreen({ navigation }) {
                               style={styles.pkgActionButton}
                               onPress={() => {
                                 setShowRegisterModal(false);
-                                navigation.navigate('LabelScanner', { packageId: p.id });
+                                navigation.navigate('LabelScanner', {
+                                  sourceOrderId: scannedPackage?.orderId || p.orderId || null,
+                                });
                               }}
                             >
                               <FileText size={20} color="#000" />

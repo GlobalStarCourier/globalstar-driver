@@ -7,9 +7,12 @@ import {
   buildBackendEndpointUrl,
 } from '@/constants/AuthClient';
 import { useAuth } from '@/context/AuthContext';
+import { extractFirstApiErrorMessage } from '@/utils/extractFirstApiErrorMessage';
 
 const DRIVER_ASSIGNED_ORDERS_PATH = '/api/shipments/routes/mobile/assigned-orders/';
 const DRIVER_PACKAGE_SCAN_PATH = '/api/shipments/routes/mobile/extra-package/scan/';
+const DRIVER_LABEL_EXTRACT_PATH = '/api/shipments/routes/mobile/extra-package/label/extract/';
+const DRIVER_LABEL_CREATE_PATH = '/api/shipments/routes/mobile/extra-package/label/create/';
 
 /**
  * @typedef {{
@@ -21,8 +24,18 @@ const DRIVER_PACKAGE_SCAN_PATH = '/api/shipments/routes/mobile/extra-package/sca
  *   status: string,
  *   trackingNumber: string,
  *   pickupLocation: string,
+ *   pickupAddress: string,
  *   sequence: number,
  *   backendStatus: string,
+ *   sender: {
+ *     firstName: string,
+ *     lastName: string,
+ *     phone: string,
+ *     email: string,
+ *     isCompany: boolean,
+ *     businessName: string,
+ *     rut: string
+ *   },
  *   photoUri?: string,
  *   completedAt?: string
  * }} DriverPackage
@@ -37,6 +50,36 @@ const DRIVER_PACKAGE_SCAN_PATH = '/api/shipments/routes/mobile/extra-package/sca
  *     qrPayload: string,
  *     scanMode: 'ASSIGNED_PICKUP' | 'EXTRA_PICKUP',
  *     sourceOrderId?: string | null
+ *   }) => Promise<Record<string, unknown>>,
+ *   extractLabelFields: (params: {
+ *     imageBase64: string,
+ *     imageMediaType: 'image/jpeg' | 'image/png' | 'image/webp'
+ *   }) => Promise<Record<string, unknown>>,
+ *   createExtraPackageFromLabel: (params: {
+ *     sourceOrderId: string,
+ *     receiver: {
+ *       firstName: string,
+ *       lastName: string,
+ *       phone: string,
+ *       email: string
+ *     },
+ *     deliveryAddress: {
+ *       validationId: string,
+ *       unit?: string,
+ *       apartment?: string,
+ *       floor?: string,
+ *       block?: string,
+ *       reference?: string,
+ *       postalCode?: string
+ *     },
+ *     isPayOnDelivery?: boolean,
+ *     packages: Array<{
+ *       description?: string,
+ *       weightG?: string | number,
+ *       declaredValueClp?: string,
+ *       isFragile?: boolean
+ *     }>,
+ *     marketplaceSource?: 'FLEX' | 'FALABELLA' | 'RIPLEY' | 'VARIAS'
  *   }) => Promise<Record<string, unknown>>,
  *   updatePackageStatus: (id: string, status: string) => void,
  *   updatePackagePhotos: (id: string, photos: Record<string, unknown>) => void,
@@ -117,6 +160,93 @@ export function PackageProvider({ children }) {
     return scanPayload;
   }
 
+  /**
+   * Extract shipping-label fields through secure backend OCR endpoint.
+   *
+   * @param {{
+   *   imageBase64: string,
+   *   imageMediaType: 'image/jpeg' | 'image/png' | 'image/webp'
+   * }} params - Label extraction request payload.
+   * @returns {Promise<Record<string, unknown>>} Extracted label payload.
+   */
+  async function extractLabelFields({ imageBase64, imageMediaType = 'image/jpeg' }) {
+    if (!AUTH_API_BASE_URL || !isAuthenticated || !accessToken || requiresPasswordChange) {
+      throw new Error('Debes iniciar sesión para extraer datos con IA.');
+    }
+
+    return requestDriverLabelExtract({
+      accessToken,
+      refreshAccessToken,
+      imageBase64,
+      imageMediaType,
+    });
+  }
+
+  /**
+   * Create one extra package from edited OCR form and refresh assigned orders.
+   *
+   * @param {{
+   *   sourceOrderId: string,
+   *   receiver: {
+   *     firstName: string,
+   *     lastName: string,
+   *     phone: string,
+   *     email: string
+   *   },
+   *   deliveryAddress: {
+   *     validationId: string,
+   *     unit?: string,
+   *     apartment?: string,
+   *     floor?: string,
+   *     block?: string,
+   *     reference?: string,
+   *     postalCode?: string
+   *   },
+   *   isPayOnDelivery?: boolean,
+   *   packages: Array<{
+   *     description?: string,
+   *     weightG?: string | number,
+   *     declaredValueClp?: string,
+   *     isFragile?: boolean
+   *   }>,
+   *   marketplaceSource?: 'FLEX' | 'FALABELLA' | 'RIPLEY' | 'VARIAS'
+   * }} params - Create extra-package request payload.
+   * @returns {Promise<Record<string, unknown>>} Create response payload.
+   */
+  async function createExtraPackageFromLabel({
+    sourceOrderId,
+    receiver,
+    deliveryAddress,
+    isPayOnDelivery = false,
+    packages,
+    marketplaceSource = 'VARIAS',
+  }) {
+    if (!AUTH_API_BASE_URL || !isAuthenticated || !accessToken || requiresPasswordChange) {
+      throw new Error('Debes iniciar sesión para crear paquetes extra.');
+    }
+
+    const createPayload = await requestDriverLabelCreate({
+      accessToken,
+      refreshAccessToken,
+      sourceOrderId,
+      receiver,
+      deliveryAddress,
+      isPayOnDelivery,
+      packages,
+      marketplaceSource,
+    });
+
+    const assignedOrdersPayload = await requestDriverAssignedOrders({
+      accessToken,
+      refreshAccessToken,
+    });
+    const normalizedPackages = mapAssignedOrdersToPackages(
+      assignedOrdersPayload?.['assigned_orders'],
+    );
+    setPackages(normalizedPackages);
+    return createPayload;
+  }
+
   useEffect(() => {
     void loadAssignedPackages({
       accessToken,
@@ -178,6 +308,8 @@ export function PackageProvider({ children }) {
     loading,
     fetchPackages,
     scanPackageQr,
+    extractLabelFields,
+    createExtraPackageFromLabel,
     updatePackageStatus,
     updatePackagePhotos,
     addPackage,
@@ -301,6 +433,165 @@ async function requestDriverPackageScan({
 }
 
 /**
+ * Send one OCR extraction request through mobile-secured backend endpoint.
+ *
+ * @param {{
+ *   accessToken: string,
+ *   refreshAccessToken: () => Promise<string>,
+ *   imageBase64: string,
+ *   imageMediaType: 'image/jpeg' | 'image/png' | 'image/webp'
+ * }} params - Label extract request params.
+ * @returns {Promise<Record<string, unknown>>} Label extraction response payload.
+ */
+async function requestDriverLabelExtract({
+  accessToken,
+  refreshAccessToken,
+  imageBase64,
+  imageMediaType,
+}) {
+  const response = await requestDriverAuthenticatedEndpoint({
+    path: DRIVER_LABEL_EXTRACT_PATH,
+    method: 'POST',
+    accessToken,
+    refreshAccessToken,
+    body: JSON.stringify({
+      image_base64: String(imageBase64 ?? '').trim(),
+      image_media_type: String(imageMediaType ?? 'image/jpeg').trim(),
+    }),
+  });
+
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(
+      extractFirstApiErrorMessage(payload) || 'No se pudieron extraer datos de la etiqueta.',
+    );
+  }
+  if (!payload || typeof payload !== 'object') {
+    return {};
+  }
+  return payload;
+}
+
+/**
+ * Send one extra-package create request through secure backend endpoint.
+ *
+ * @param {{
+ *   accessToken: string,
+ *   refreshAccessToken: () => Promise<string>,
+ *   sourceOrderId: string,
+ *   receiver: {
+ *     firstName: string,
+ *     lastName: string,
+ *     phone: string,
+ *     email: string
+ *   },
+ *   deliveryAddress: {
+ *     validationId: string,
+ *     unit?: string,
+ *     apartment?: string,
+ *     floor?: string,
+ *     block?: string,
+ *     reference?: string,
+ *     postalCode?: string
+ *   },
+ *   isPayOnDelivery?: boolean,
+ *   packages: Array<{
+ *     description?: string,
+ *     weightG?: string | number,
+ *     declaredValueClp?: string,
+ *     isFragile?: boolean
+ *   }>,
+ *   marketplaceSource?: 'FLEX' | 'FALABELLA' | 'RIPLEY' | 'VARIAS'
+ * }} params - Extra-package request params.
+ * @returns {Promise<Record<string, unknown>>} Create response payload.
+ */
+async function requestDriverLabelCreate({
+  accessToken,
+  refreshAccessToken,
+  sourceOrderId,
+  receiver,
+  deliveryAddress,
+  isPayOnDelivery = false,
+  packages,
+  marketplaceSource = 'VARIAS',
+}) {
+  const normalizedDeliveryAddress = {
+    validation_id: String(deliveryAddress?.validationId ?? '').trim(),
+  };
+  const optionalDeliveryFields = [
+    ['unit', deliveryAddress?.unit],
+    ['apartment', deliveryAddress?.apartment],
+    ['floor', deliveryAddress?.floor],
+    ['block', deliveryAddress?.block],
+    ['reference', deliveryAddress?.reference],
+    ['postal_code', deliveryAddress?.postalCode],
+  ];
+  for (const [fieldName, fieldValue] of optionalDeliveryFields) {
+    const normalizedFieldValue = String(fieldValue ?? '').trim();
+    if (normalizedFieldValue) {
+      normalizedDeliveryAddress[fieldName] = normalizedFieldValue;
+    }
+  }
+
+  const normalizedPackages = Array.isArray(packages)
+    ? packages.map((packageCandidate) => {
+        const normalizedPackage = {
+          is_fragile: packageCandidate?.isFragile === true,
+        };
+        const description = String(packageCandidate?.description ?? '').trim();
+        if (description) {
+          normalizedPackage['description'] = description;
+        }
+
+        const normalizedWeight = Number.parseInt(
+          String(packageCandidate?.weightG ?? '').trim(),
+          10,
+        );
+        if (Number.isFinite(normalizedWeight)) {
+          normalizedPackage['weight_g'] = normalizedWeight;
+        }
+
+        const declaredValue = String(packageCandidate?.declaredValueClp ?? '').trim();
+        if (declaredValue) {
+          normalizedPackage['declared_value_clp'] = declaredValue;
+        }
+        return normalizedPackage;
+      })
+    : [];
+
+  const response = await requestDriverAuthenticatedEndpoint({
+    path: DRIVER_LABEL_CREATE_PATH,
+    method: 'POST',
+    accessToken,
+    refreshAccessToken,
+    body: JSON.stringify({
+      source_order_id: String(sourceOrderId ?? '').trim(),
+      receiver: {
+        first_name: String(receiver?.firstName ?? '').trim(),
+        last_name: String(receiver?.lastName ?? '').trim(),
+        phone: String(receiver?.phone ?? '').trim(),
+        email: String(receiver?.email ?? '').trim(),
+      },
+      is_pay_on_delivery: isPayOnDelivery === true,
+      packages: normalizedPackages,
+      marketplace_source: String(marketplaceSource ?? 'VARIAS')
+        .trim()
+        .toUpperCase(),
+      delivery_address: normalizedDeliveryAddress,
+    }),
+  });
+
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(extractFirstApiErrorMessage(payload) || 'No se pudo crear el paquete extra.');
+  }
+  if (!payload || typeof payload !== 'object') {
+    return {};
+  }
+  return payload;
+}
+
+/**
  * Send one authenticated mobile request and retry once after session refresh on 401.
  *
  * @param {{
@@ -356,6 +647,14 @@ async function requestDriverAuthenticatedEndpoint({
  *   order_code?: unknown,
  *   address_type?: unknown,
  *   address?: unknown,
+ *   pickup_address?: unknown,
+ *   sender_first_name?: unknown,
+ *   sender_last_name?: unknown,
+ *   sender_phone?: unknown,
+ *   sender_email?: unknown,
+ *   sender_is_company?: unknown,
+ *   sender_business_name?: unknown,
+ *   sender_rut?: unknown,
  *   status?: unknown,
  *   created_at?: unknown,
  *   requested_at?: unknown,
@@ -380,7 +679,15 @@ function mapAssignedOrdersToPackages(assignedOrdersCandidate) {
       receiver_phone: receiverPhoneRaw,
       order_code: orderCodeRaw,
       address_type: addressTypeRaw,
+      pickup_address: pickupAddressRaw,
       sequence: sequenceRaw,
+      sender_first_name: senderFirstNameRaw,
+      sender_last_name: senderLastNameRaw,
+      sender_phone: senderPhoneRaw,
+      sender_email: senderEmailRaw,
+      sender_is_company: senderIsCompanyRaw,
+      sender_business_name: senderBusinessNameRaw,
+      sender_rut: senderRutRaw,
     } = safeRawOrder;
 
     const mappedStatus = mapBackendStatusToPackageStatus(backendStatusCandidate);
@@ -398,8 +705,18 @@ function mapAssignedOrdersToPackages(assignedOrdersCandidate) {
       status: mappedStatus,
       trackingNumber: String(orderCodeRaw ?? `ORD-${index + 1}`),
       pickupLocation: String(addressTypeRaw ?? ''),
+      pickupAddress: String(pickupAddressRaw ?? ''),
       sequence: Number(sequenceRaw ?? index + 1),
       backendStatus: String(backendStatusCandidate ?? ''),
+      sender: {
+        firstName: String(senderFirstNameRaw ?? ''),
+        lastName: String(senderLastNameRaw ?? ''),
+        phone: String(senderPhoneRaw ?? ''),
+        email: String(senderEmailRaw ?? ''),
+        isCompany: senderIsCompanyRaw === true,
+        businessName: String(senderBusinessNameRaw ?? ''),
+        rut: String(senderRutRaw ?? ''),
+      },
       completedAt,
     };
   });
@@ -434,30 +751,4 @@ function mapBackendStatusToPackageStatus(backendStatusCandidate) {
     return 'rechazado';
   }
   return 'pendiente';
-}
-
-/**
- * Extract one readable message from API payloads.
- *
- * @param {any} payloadCandidate - Raw backend payload.
- * @returns {string} First available API message.
- */
-function extractFirstApiErrorMessage(payloadCandidate) {
-  if (!payloadCandidate || typeof payloadCandidate !== 'object') {
-    return '';
-  }
-  if (typeof payloadCandidate.detail === 'string' && payloadCandidate.detail.trim()) {
-    return payloadCandidate.detail.trim();
-  }
-
-  for (const value of Object.values(payloadCandidate)) {
-    if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'string') {
-      return value[0].trim();
-    }
-    if (typeof value === 'string' && value.trim()) {
-      return value.trim();
-    }
-  }
-
-  return '';
 }

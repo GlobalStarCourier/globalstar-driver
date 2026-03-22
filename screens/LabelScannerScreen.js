@@ -1,625 +1,1124 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-    StyleSheet,
-    Text,
-    View,
-    TouchableOpacity,
-    TextInput,
-    ScrollView,
-    Alert,
-    Modal,
-    ActivityIndicator,
-    KeyboardAvoidingView,
-    Platform
+  ActivityIndicator,
+  Alert,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import {
-    ArrowLeft,
-    Camera as CameraIcon,
-    CheckCircle,
-    User,
-    MapPin,
-    Phone,
-    Package,
-    ChevronDown,
-    RotateCcw,
-    FileText,
-    AlertCircle,
-    Eye,
-    Sparkles
-} from 'lucide-react-native';
+import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
-import * as ImageManipulator from 'expo-image-manipulator';
-import { usePackages } from '../context/PackageContext';
+import {
+  ArrowLeft,
+  Box,
+  CheckCircle2,
+  FileText,
+  Mail,
+  MapPin,
+  Phone,
+  Sparkles,
+  User,
+} from 'lucide-react-native';
 
-// ─── Configuración ────────────────────────────────────────────────────────────
-// Reemplazá con tu API key de Anthropic en un archivo .env
-const ANTHROPIC_API_KEY = process.env.EXPO_PUBLIC_ANTHROPIC_API_KEY;
-const COMPANIES = ['Flex', 'Falabella', 'Ripley', 'Varias'];
+import AppInput from '@/components/ui/AppInput';
+import { buildBackendEndpointUrl } from '@/constants/AuthClient';
+import { usePackages } from '@/context/PackageContext';
+import { extractFirstApiErrorMessage } from '@/utils/extractFirstApiErrorMessage';
 
-const COMPANY_COLORS = {
-    'Flex': { main: '#0EA5E9', light: '#E0F2FE', text: '#0369A1' },
-    'Falabella': { main: '#10B981', light: '#DCFCE7', text: '#065F46' },
-    'Ripley': { main: '#EC4899', light: '#FDF2F8', text: '#9D174D' },
-    'Varias': { main: '#6B7280', light: '#F3F4F6', text: '#374151' }
-};
+const SUGGESTIONS_API_PATH = '/api/shipments/address-suggestions/';
+const VALIDATIONS_API_PATH = '/api/shipments/address-validations/';
+const DESTINATION_DEBOUNCE_MS = 450;
+/** @typedef {'FLEX' | 'FALABELLA' | 'RIPLEY' | 'VARIAS'} MarketplaceSource */
 
-// ─── Claude claude-haiku-4-5 con visión ────────────────────────────────────────────
-async function readLabelWithClaude(base64Image) {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-            'x-api-key': ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json'
-        },
-        body: JSON.stringify({
-            model: 'claude-haiku-4-5',
-            max_tokens: 512,
-            messages: [
-                {
-                    role: 'user',
-                    content: [
-                        {
-                            type: 'image',
-                            source: {
-                                type: 'base64',
-                                media_type: 'image/jpeg',
-                                data: base64Image
-                            }
-                        },
-                        {
-                            type: 'text',
-                            text: `Eres un experto en logística. Analizá esta etiqueta de envío y extraé todos los datos que puedas ver.
+/**
+ * @typedef {{
+ *   firstName: string,
+ *   lastName: string,
+ *   phone: string,
+ *   email: string,
+ *   isCompany: boolean,
+ *   businessName: string,
+ *   rut: string
+ * }} ContactState
+ */
 
-Respondé ÚNICAMENTE con un objeto JSON válido (sin markdown, sin explicaciones), con exactamente esta estructura:
-{
-  "senderName": "nombre completo del remitente, o cadena vacía si no se ve",
-  "senderPhone": "teléfono del remitente, o cadena vacía",
-  "senderAddress": "dirección completa del remitente, o cadena vacía",
-  "recipientName": "nombre completo del destinatario, o cadena vacía",
-  "recipientPhone": "teléfono del destinatario, o cadena vacía",
-  "recipientAddress": "dirección completa del destinatario, o cadena vacía",
-  "company": "una de Flex / Falabella / Ripley si la ves en la etiqueta, sino cadena vacía",
-  "trackingNumber": "código de seguimiento o número de orden, o cadena vacía"
+/**
+ * @typedef {{
+ *   query: string,
+ *   validationId: string,
+ *   unit: string,
+ *   apartment: string,
+ *   floor: string,
+ *   block: string,
+ *   reference: string,
+ *   postalCode: string
+ * }} DeliveryAddressState
+ */
+
+/**
+ * @typedef {{
+ *   description: string,
+ *   weightG: string,
+ *   declaredValueClp: string,
+ *   isFragile: boolean
+ * }} PackageRowState
+ */
+
+/**
+ * @typedef {{
+ *   providerPlaceId: string,
+ *   displayName: string
+ * }} AddressSuggestion
+ */
+
+/**
+ * @typedef {{
+ *   receiverName: string,
+ *   receiverPhone: string,
+ *   receiverAddress: string,
+ *   trackingNumber: string,
+ *   company: string,
+ *   detail: string
+ * }} NormalizedLabelExtraction
+ */
+
+/** @typedef {'firstName' | 'lastName' | 'phone' | 'email'} ReceiverEditableField */
+/** @typedef {'query' | 'unit' | 'apartment' | 'floor' | 'block' | 'reference' | 'postalCode'} DeliveryEditableField */
+/** @typedef {'description' | 'weightG' | 'declaredValueClp'} PackageEditableField */
+
+/** @type {MarketplaceSource[]} */
+const MARKETPLACE_OPTIONS = ['FLEX', 'FALABELLA', 'RIPLEY', 'VARIAS'];
+
+/**
+ * Resolve one readable message from an unknown caught error.
+ *
+ * @param {unknown} errorCandidate - Unknown thrown value.
+ * @param {string} fallbackMessage - Fallback message when candidate has no text.
+ * @returns {string} Safe message for UI.
+ */
+function resolveErrorMessage(errorCandidate, fallbackMessage) {
+  if (errorCandidate instanceof Error && errorCandidate.message.trim()) {
+    return errorCandidate.message.trim();
+  }
+  if (errorCandidate && typeof errorCandidate === 'object' && 'message' in errorCandidate) {
+    const messageCandidate = String(errorCandidate.message ?? '').trim();
+    if (messageCandidate) {
+      return messageCandidate;
+    }
+  }
+  return fallbackMessage;
 }
 
-Si la imagen no contiene una etiqueta o no se puede leer, devolvé el JSON con todos los campos como cadena vacía.`
-                        }
-                    ]
-                }
-            ]
-        })
-    });
+/**
+ * Normalize raw backend destination suggestions into a safe shape for UI.
+ *
+ * @param {unknown} payloadCandidate - Raw suggestion payload.
+ * @returns {AddressSuggestion[]} Valid suggestions.
+ */
+function normalizeDestinationSuggestions(payloadCandidate) {
+  if (!payloadCandidate || typeof payloadCandidate !== 'object') {
+    return [];
+  }
+  const candidatesCandidate = payloadCandidate['candidates'];
+  if (!Array.isArray(candidatesCandidate)) {
+    return [];
+  }
 
-    if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        const msg = err?.error?.message || `HTTP ${res.status}`;
-        throw new Error(`Error de API: ${msg}`);
+  return candidatesCandidate
+    .filter((candidate) => candidate && typeof candidate === 'object')
+    .map((candidate) => ({
+      providerPlaceId: String(candidate['provider_place_id'] ?? '').trim(),
+      displayName: String(candidate['display_name'] ?? '').trim(),
+    }))
+    .filter((candidate) => candidate.providerPlaceId && candidate.displayName);
+}
+
+/**
+ * Normalize raw validation payload into safe result fields.
+ *
+ * @param {unknown} payloadCandidate - Raw validation payload.
+ * @param {string} fallbackAddress - Fallback formatted address.
+ * @returns {{validationId: string, formattedAddress: string}} Normalized validation fields.
+ */
+function normalizeValidationPayload(payloadCandidate, fallbackAddress) {
+  if (!payloadCandidate || typeof payloadCandidate !== 'object') {
+    return { validationId: '', formattedAddress: String(fallbackAddress ?? '').trim() };
+  }
+  return {
+    validationId: String(payloadCandidate['validation_id'] ?? '').trim(),
+    formattedAddress: String(payloadCandidate['formatted_address'] ?? fallbackAddress).trim(),
+  };
+}
+
+/**
+ * Normalize backend extraction payload into one predictable shape.
+ *
+ * @param {unknown} extractionPayloadCandidate - Raw extraction response payload.
+ * @returns {NormalizedLabelExtraction} Normalized extraction data.
+ */
+function normalizeLabelExtraction(extractionPayloadCandidate) {
+  const fallbackExtraction = {
+    receiverName: '',
+    receiverPhone: '',
+    receiverAddress: '',
+    trackingNumber: '',
+    company: '',
+    detail: '',
+  };
+  if (!extractionPayloadCandidate || typeof extractionPayloadCandidate !== 'object') {
+    return fallbackExtraction;
+  }
+
+  const fieldsCandidate =
+    extractionPayloadCandidate['fields'] && typeof extractionPayloadCandidate['fields'] === 'object'
+      ? extractionPayloadCandidate['fields']
+      : {};
+
+  return {
+    receiverName: String(fieldsCandidate['recipient_name'] ?? '').trim(),
+    receiverPhone: String(fieldsCandidate['recipient_phone'] ?? '').trim(),
+    receiverAddress: String(fieldsCandidate['recipient_address'] ?? '').trim(),
+    trackingNumber: String(fieldsCandidate['tracking_number'] ?? '').trim(),
+    company: String(fieldsCandidate['company'] ?? '').trim(),
+    detail: String(extractionPayloadCandidate['detail'] ?? '').trim(),
+  };
+}
+
+/**
+ * Return one empty contact state aligned with web order creation fields.
+ *
+ * @returns {ContactState} Empty contact state.
+ */
+function createEmptyContact() {
+  return {
+    firstName: '',
+    lastName: '',
+    phone: '',
+    email: '',
+    isCompany: false,
+    businessName: '',
+    rut: '',
+  };
+}
+
+/**
+ * Return one empty delivery address state aligned with address-validation fields.
+ *
+ * @returns {DeliveryAddressState} Empty delivery address state.
+ */
+function createEmptyDeliveryAddress() {
+  return {
+    query: '',
+    validationId: '',
+    unit: '',
+    apartment: '',
+    floor: '',
+    block: '',
+    reference: '',
+    postalCode: '',
+  };
+}
+
+/**
+ * Return one empty package row state aligned with web payload contract.
+ *
+ * @returns {PackageRowState} Empty package row state.
+ */
+function createEmptyPackageRow() {
+  return {
+    description: '',
+    weightG: '',
+    declaredValueClp: '',
+    isFragile: false,
+  };
+}
+
+/**
+ * Parse one full name into first/last names.
+ *
+ * @param {string} fullName - Raw full name.
+ * @returns {{firstName: string, lastName: string}} Split names.
+ */
+function splitFullName(fullName) {
+  const normalizedName = String(fullName ?? '').trim();
+  if (!normalizedName) {
+    return { firstName: '', lastName: '' };
+  }
+  const nameParts = normalizedName.split(/\s+/);
+  if (nameParts.length === 1) {
+    return { firstName: nameParts[0], lastName: '' };
+  }
+  return { firstName: nameParts[0], lastName: nameParts.slice(1).join(' ') };
+}
+
+/**
+ * Convert OCR company text into supported marketplace source options.
+ *
+ * @param {string} companyText - OCR company candidate.
+ * @returns {'FLEX' | 'FALABELLA' | 'RIPLEY' | 'VARIAS'} Marketplace source.
+ */
+function mapCompanyTextToMarketplaceSource(companyText) {
+  const normalizedCompany = String(companyText ?? '')
+    .trim()
+    .toUpperCase();
+  if (normalizedCompany.includes('FALABELLA')) {
+    return 'FALABELLA';
+  }
+  if (normalizedCompany.includes('RIPLEY')) {
+    return 'RIPLEY';
+  }
+  if (normalizedCompany.includes('FLEX')) {
+    return 'FLEX';
+  }
+  return 'VARIAS';
+}
+
+/**
+ * Mobile screen that creates one extra package using OCR prefill + web-aligned fields.
+ *
+ * @param {{
+ *   navigation: import('@react-navigation/native-stack').NativeStackNavigationProp<any>,
+ *   route: { params?: { sourceOrderId?: string } }
+ * }} props - Navigation props.
+ * @returns {import('react').ReactElement} Label scanner screen.
+ */
+export default function LabelScannerScreen({ navigation, route }) {
+  const sourceOrderId = String(route?.params?.sourceOrderId ?? '').trim();
+  const { packages, extractLabelFields, createExtraPackageFromLabel } = usePackages();
+  const sourceOrderPackage = packages.find((packageRow) => packageRow.orderId === sourceOrderId);
+  const sourcePickupAddress = String(
+    sourceOrderPackage?.pickupAddress ||
+      (sourceOrderPackage?.pickupLocation === 'PICKUP' ? sourceOrderPackage.address : ''),
+  ).trim();
+  /** @type {[ContactState, import('react').Dispatch<import('react').SetStateAction<ContactState>>]} */
+  const [sender, setSender] = useState(createEmptyContact());
+  /** @type {[ContactState, import('react').Dispatch<import('react').SetStateAction<ContactState>>]} */
+  const [receiver, setReceiver] = useState(createEmptyContact());
+  /** @type {[DeliveryAddressState, import('react').Dispatch<import('react').SetStateAction<DeliveryAddressState>>]} */
+  const [deliveryAddress, setDeliveryAddress] = useState(createEmptyDeliveryAddress());
+  /** @type {[PackageRowState, import('react').Dispatch<import('react').SetStateAction<PackageRowState>>]} */
+  const [packageRow, setPackageRow] = useState(createEmptyPackageRow());
+  const [isPayOnDelivery, setIsPayOnDelivery] = useState(false);
+  /** @type {[MarketplaceSource, import('react').Dispatch<import('react').SetStateAction<MarketplaceSource>>]} */
+  const [marketplaceSource, setMarketplaceSource] = useState('VARIAS');
+  const [statusMessage, setStatusMessage] = useState('');
+  /** @type {[AddressSuggestion[], import('react').Dispatch<import('react').SetStateAction<AddressSuggestion[]>>]} */
+  const [destinationSuggestions, setDestinationSuggestions] = useState([]);
+  const [isFetchingSuggestions, setIsFetchingSuggestions] = useState(false);
+  const [isValidatingDestination, setIsValidatingDestination] = useState(false);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const destinationDebounceRef = useRef(/** @type {ReturnType<typeof setTimeout> | null} */ (null));
+
+  useEffect(() => {
+    const fallbackSender = createEmptyContact();
+    if (!sourceOrderPackage?.sender || typeof sourceOrderPackage.sender !== 'object') {
+      setSender(fallbackSender);
+      return;
     }
 
-    const data = await res.json();
-    const raw = data?.content?.[0]?.text || '';
+    const sourceSender = sourceOrderPackage.sender;
+    setSender({
+      firstName: String(sourceSender.firstName ?? '').trim(),
+      lastName: String(sourceSender.lastName ?? '').trim(),
+      phone: String(sourceSender.phone ?? '').trim(),
+      email: String(sourceSender.email ?? '').trim(),
+      isCompany: sourceSender.isCompany === true,
+      businessName: String(sourceSender.businessName ?? '').trim(),
+      rut: String(sourceSender.rut ?? '').trim(),
+    });
+  }, [sourceOrderPackage]);
 
-    // Extraer JSON del texto (por si Claude agrega algo extra)
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('Claude no devolvió un JSON válido. Intentá de nuevo.');
+  useEffect(() => {
+    if (destinationDebounceRef.current) {
+      clearTimeout(destinationDebounceRef.current);
+      destinationDebounceRef.current = null;
+    }
+    const normalizedQuery = String(deliveryAddress.query ?? '').trim();
+    if (
+      normalizedQuery !== '' &&
+      deliveryAddress.validationId &&
+      normalizedQuery === String(deliveryAddress.query).trim()
+    ) {
+      setDestinationSuggestions([]);
+      setIsFetchingSuggestions(false);
+      return;
+    }
+    if (normalizedQuery.length < 3) {
+      setDestinationSuggestions([]);
+      setIsFetchingSuggestions(false);
+      return;
+    }
+    destinationDebounceRef.current = setTimeout(() => {
+      void fetchDestinationSuggestions(normalizedQuery);
+    }, DESTINATION_DEBOUNCE_MS);
 
-    return JSON.parse(match[0]);
-}
-
-// ─── Estado inicial ───────────────────────────────────────────────────────────
-const emptyForm = {
-    senderName: '', senderPhone: '', senderAddress: '',
-    recipientName: '', recipientPhone: '', recipientAddress: '',
-    company: '', trackingNumber: ''
-};
-
-// ═════════════════════════════════════════════════════════════════════════════
-export default function LabelScannerScreen({ navigation }) {
-    const { addPackage } = usePackages();
-    const [form, setForm] = useState(emptyForm);
-    const [savedOk, setSavedOk] = useState(false);
-    const [rawJson, setRawJson] = useState('');
-    const [showRaw, setShowRaw] = useState(false);
-    const [status, setStatus] = useState('idle'); // idle | processing | done | error
-    const [statusMsg, setStatusMsg] = useState('');
-
-    // ── Captura y llamado a Claude ──────────────────────────────────────────
-    const handleCapture = async () => {
-        const { status: perm } = await ImagePicker.requestCameraPermissionsAsync();
-        if (perm !== 'granted') {
-            Alert.alert('Permiso denegado', 'Necesitamos acceso a la cámara.');
-            return;
-        }
-
-        const result = await ImagePicker.launchCameraAsync({
-            quality: 0.9,
-            allowsEditing: true,
-            aspect: [4, 3],
-            base64: false
-        });
-
-        if (result.canceled) return;
-
-        const asset = result.assets[0];
-
-        try {
-            setSavedOk(false);
-            setStatus('processing');
-            setStatusMsg('Claude está leyendo la etiqueta...');
-
-            // ── Comprimir y redimensionar imagen para bajar costos ──
-            // Una imagen de 800px de ancho es suficiente para leer texto y gasta ~10x menos tokens
-            const manipulated = await ImageManipulator.manipulateAsync(
-                asset.uri,
-                [{ resize: { width: 800 } }],
-                { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true }
-            );
-
-            if (!manipulated.base64) {
-                throw new Error('No se pudo comprimir la imagen.');
-            }
-
-            const extracted = await readLabelWithClaude(manipulated.base64);
-            setRawJson(JSON.stringify(extracted, null, 2));
-
-            // Fusionar con campos ya llenados (no pisar datos manuales)
-            setForm(prev => ({
-                senderName: extracted.senderName || prev.senderName,
-                senderPhone: extracted.senderPhone || prev.senderPhone,
-                senderAddress: extracted.senderAddress || prev.senderAddress,
-                recipientName: extracted.recipientName || prev.recipientName,
-                recipientPhone: extracted.recipientPhone || prev.recipientPhone,
-                recipientAddress: extracted.recipientAddress || prev.recipientAddress,
-                company: extracted.company || prev.company,
-                trackingNumber: extracted.trackingNumber || prev.trackingNumber,
-            }));
-
-            setStatus('done');
-            setStatusMsg('¡Etiqueta leída! Revisá y completá los campos si hace falta.');
-        } catch (e) {
-            console.error('Claude label error:', e);
-            setStatus('error');
-            setStatusMsg(e.message || 'No se pudo procesar la etiqueta.');
-        }
+    return () => {
+      if (destinationDebounceRef.current) {
+        clearTimeout(destinationDebounceRef.current);
+        destinationDebounceRef.current = null;
+      }
     };
+  }, [deliveryAddress.query, deliveryAddress.validationId]);
 
-    const handleReset = () => {
-        Alert.alert('Limpiar formulario', '¿Querés borrar todos los datos?', [
-            { text: 'Cancelar', style: 'cancel' },
-            {
-                text: 'Limpiar', style: 'destructive', onPress: () => {
-                    setForm(emptyForm);
-                    setStatus('idle');
-                    setStatusMsg('');
-                    setRawJson('');
-                    setSavedOk(false);
-                }
-            }
-        ]);
-    };
+  /**
+   * Search destination suggestions from backend geocoding proxy.
+   *
+   * @param {string} queryText - User query text.
+   * @returns {Promise<void>} Async completion.
+   */
+  async function fetchDestinationSuggestions(queryText) {
+    setIsFetchingSuggestions(true);
+    try {
+      const endpoint = buildBackendEndpointUrl(
+        `${SUGGESTIONS_API_PATH}?q=${encodeURIComponent(queryText)}&limit=5`,
+      );
+      const response = await fetch(endpoint, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+      });
+      const payloadCandidate = await response.json().catch(() => null);
+      if (!response.ok) {
+        setDestinationSuggestions([]);
+        setStatusMessage(
+          extractFirstApiErrorMessage(payloadCandidate) ||
+            'No se pudieron cargar sugerencias de dirección.',
+        );
+        return;
+      }
+      setDestinationSuggestions(normalizeDestinationSuggestions(payloadCandidate));
+    } catch (error) {
+      setDestinationSuggestions([]);
+      setStatusMessage(resolveErrorMessage(error, 'Error al buscar sugerencias.'));
+    } finally {
+      setIsFetchingSuggestions(false);
+    }
+  }
 
-    const handleSave = () => {
-        if (!form.recipientName && !form.recipientAddress) {
-            Alert.alert('Datos incompletos', 'Completá al menos nombre o dirección del destinatario.');
-            return;
-        }
+  /**
+   * Validate selected destination candidate and store resulting validation id.
+   *
+   * @param {AddressSuggestion} suggestionCandidate - Selected suggestion candidate.
+   * @returns {Promise<void>} Async completion.
+   */
+  async function selectAndValidateDestination(suggestionCandidate) {
+    const providerPlaceId = String(suggestionCandidate?.providerPlaceId ?? '').trim();
+    const displayName = String(suggestionCandidate?.displayName ?? '').trim();
+    if (!providerPlaceId || !displayName) {
+      return;
+    }
 
-        // Crear objeto de paquete para el contexto
-        const newPkg = {
-            trackingNumber: form.trackingNumber || `LBL-${Date.now()}`,
-            customerName: form.recipientName || 'Sin nombre',
-            address: form.recipientAddress || 'Sin dirección',
-            phone: form.recipientPhone || '',
-            status: 'recogido', // Al escanear etiqueta, se asume recogido/registrado
-            company: form.company || 'Varias'
-        };
+    setIsValidatingDestination(true);
+    try {
+      const response = await fetch(buildBackendEndpointUrl(VALIDATIONS_API_PATH), {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query_text: String(deliveryAddress.query ?? '').trim() || displayName,
+          provider_place_id: providerPlaceId,
+        }),
+      });
+      const payloadCandidate = await response.json().catch(() => null);
+      if (!response.ok) {
+        setDeliveryAddress(
+          /**
+           * @param {DeliveryAddressState} currentAddress
+           * @returns {DeliveryAddressState}
+           */
+          (currentAddress) => ({
+            ...currentAddress,
+            validationId: '',
+          }),
+        );
+        Alert.alert(
+          'Dirección inválida',
+          extractFirstApiErrorMessage(payloadCandidate) ||
+            'No se pudo validar la dirección seleccionada.',
+        );
+        return;
+      }
 
-        addPackage(newPkg);
-        setSavedOk(true);
-        // Alert.alert('¡Guardado!', 'Registro de etiqueta guardado correctamente.');
-    };
+      const { validationId, formattedAddress } = normalizeValidationPayload(
+        payloadCandidate,
+        displayName,
+      );
+      if (!validationId || !formattedAddress) {
+        setDeliveryAddress(
+          /**
+           * @param {DeliveryAddressState} currentAddress
+           * @returns {DeliveryAddressState}
+           */
+          (currentAddress) => ({
+            ...currentAddress,
+            validationId: '',
+          }),
+        );
+        Alert.alert('Dirección inválida', 'No se pudo validar la dirección seleccionada.');
+        return;
+      }
 
-    const setField = key => val => setForm(p => ({ ...p, [key]: val }));
+      setDeliveryAddress(
+        /**
+         * @param {DeliveryAddressState} currentAddress
+         * @returns {DeliveryAddressState}
+         */
+        (currentAddress) => ({
+          ...currentAddress,
+          query: formattedAddress,
+          validationId,
+        }),
+      );
+      setDestinationSuggestions([]);
+      setStatusMessage('Dirección de destino validada.');
+    } catch (error) {
+      setDeliveryAddress(
+        /**
+         * @param {DeliveryAddressState} currentAddress
+         * @returns {DeliveryAddressState}
+         */
+        (currentAddress) => ({
+          ...currentAddress,
+          validationId: '',
+        }),
+      );
+      Alert.alert(
+        'Dirección inválida',
+        resolveErrorMessage(error, 'No se pudo validar la dirección.'),
+      );
+    } finally {
+      setIsValidatingDestination(false);
+    }
+  }
 
-    // ── Componente de campo ─────────────────────────────────────────────────
-    const Field = ({ label, value, onChangeText, placeholder, icon: Icon, multiline }) => (
-        <View style={styles.fieldWrapper}>
-            <Text style={styles.fieldLabel}>{label}</Text>
-            <View style={[styles.fieldRow, multiline && { alignItems: 'flex-start' }]}>
-                <Icon color="#BBBBBB" size={14} style={multiline ? { marginTop: 12 } : {}} />
-                <TextInput
-                    style={[styles.fieldInput, multiline && styles.fieldInputMulti]}
-                    value={value}
-                    onChangeText={onChangeText}
-                    placeholder={placeholder}
-                    placeholderTextColor="#DDDDDD"
-                    multiline={multiline}
-                    numberOfLines={multiline ? 2 : 1}
-                />
-            </View>
+  /**
+   * Capture one label image and request OCR extraction from backend.
+   *
+   * @returns {Promise<void>} Async completion.
+   */
+  async function captureAndExtractLabel() {
+    const cameraPermission = await ImagePicker.requestCameraPermissionsAsync();
+    if (cameraPermission.status !== 'granted') {
+      Alert.alert('Permiso denegado', 'Necesitamos acceso a la cámara para leer etiquetas.');
+      return;
+    }
+
+    const cameraResult = await ImagePicker.launchCameraAsync({
+      quality: 0.9,
+      allowsEditing: true,
+      aspect: [4, 3],
+      base64: false,
+    });
+    if (cameraResult.canceled) {
+      return;
+    }
+    const selectedAsset = cameraResult.assets?.[0];
+    if (!selectedAsset?.uri) {
+      Alert.alert('Imagen inválida', 'No se pudo capturar la imagen de la etiqueta.');
+      return;
+    }
+
+    setIsExtracting(true);
+    setStatusMessage('Procesando etiqueta con IA...');
+    try {
+      const manipulationContext = ImageManipulator.manipulate(selectedAsset.uri);
+      manipulationContext.resize({ width: 1000 });
+      const manipulatedImageRef = await manipulationContext.renderAsync();
+      const manipulatedImage = await manipulatedImageRef.saveAsync({
+        compress: 0.72,
+        format: SaveFormat.JPEG,
+        base64: true,
+      });
+      if (!manipulatedImage.base64) {
+        setStatusMessage('');
+        Alert.alert(
+          'No se pudo procesar la etiqueta',
+          'No se pudo preparar la imagen para extracción.',
+        );
+        return;
+      }
+
+      const extractionPayload = await extractLabelFields({
+        imageBase64: manipulatedImage.base64,
+        imageMediaType: 'image/jpeg',
+      });
+      const normalizedExtraction = normalizeLabelExtraction(extractionPayload);
+      const receiverNames = splitFullName(normalizedExtraction.receiverName);
+      setReceiver(
+        /**
+         * @param {ContactState} currentReceiver
+         * @returns {ContactState}
+         */
+        (currentReceiver) => ({
+          ...currentReceiver,
+          firstName: receiverNames.firstName || currentReceiver.firstName,
+          lastName: receiverNames.lastName || currentReceiver.lastName,
+          phone: normalizedExtraction.receiverPhone || currentReceiver.phone,
+        }),
+      );
+
+      const extractedDestination = normalizedExtraction.receiverAddress;
+      if (extractedDestination) {
+        setDeliveryAddress(
+          /**
+           * @param {DeliveryAddressState} currentAddress
+           * @returns {DeliveryAddressState}
+           */
+          (currentAddress) => ({
+            ...currentAddress,
+            query: extractedDestination,
+            validationId: '',
+          }),
+        );
+      }
+
+      const extractedTracking = normalizedExtraction.trackingNumber;
+      if (extractedTracking && String(packageRow.description).trim() === '') {
+        setPackageRow(
+          /**
+           * @param {PackageRowState} currentPackage
+           * @returns {PackageRowState}
+           */
+          (currentPackage) => ({
+            ...currentPackage,
+            description: `Tracking: ${extractedTracking}`,
+          }),
+        );
+      }
+
+      setMarketplaceSource(mapCompanyTextToMarketplaceSource(normalizedExtraction.company));
+      setStatusMessage(
+        normalizedExtraction.detail || 'Etiqueta procesada. Revisa y corrige antes de confirmar.',
+      );
+    } catch (error) {
+      setStatusMessage('');
+      Alert.alert(
+        'No se pudo procesar la etiqueta',
+        resolveErrorMessage(error, 'Intenta nuevamente.'),
+      );
+    } finally {
+      setIsExtracting(false);
+    }
+  }
+
+  /**
+   * Persist extra package with web-aligned fields and secure backend ownership checks.
+   *
+   * @returns {Promise<void>} Async completion.
+   */
+  async function saveExtraPackage() {
+    if (!sourceOrderId) {
+      Alert.alert('Orden base faltante', 'No se encontró orden base para este paquete extra.');
+      return;
+    }
+    if (!deliveryAddress.validationId) {
+      Alert.alert('Dirección pendiente', 'Debes validar la dirección de destino.');
+      return;
+    }
+    if (
+      !receiver.firstName.trim() ||
+      !receiver.lastName.trim() ||
+      !receiver.phone.trim() ||
+      !receiver.email.trim()
+    ) {
+      Alert.alert('Datos incompletos', 'Completa todos los campos del destinatario.');
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      await createExtraPackageFromLabel({
+        sourceOrderId,
+        receiver: {
+          firstName: receiver.firstName,
+          lastName: receiver.lastName,
+          phone: receiver.phone,
+          email: receiver.email,
+        },
+        deliveryAddress: {
+          validationId: deliveryAddress.validationId,
+          unit: deliveryAddress.unit,
+          apartment: deliveryAddress.apartment,
+          floor: deliveryAddress.floor,
+          block: deliveryAddress.block,
+          reference: deliveryAddress.reference,
+          postalCode: deliveryAddress.postalCode,
+        },
+        isPayOnDelivery,
+        packages: [
+          {
+            description: packageRow.description,
+            weightG: packageRow.weightG,
+            declaredValueClp: packageRow.declaredValueClp,
+            isFragile: packageRow.isFragile,
+          },
+        ],
+        marketplaceSource,
+      });
+
+      Alert.alert('Paquete extra creado', 'El paquete quedó asignado y retirado.', [
+        { text: 'Continuar', onPress: () => navigation.goBack() },
+      ]);
+    } catch (error) {
+      Alert.alert('No se pudo crear el paquete', resolveErrorMessage(error, 'Intenta nuevamente.'));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  /**
+   * Update one editable receiver field from text input.
+   *
+   * @param {ReceiverEditableField} field - Receiver field key.
+   * @param {string} value - Input value.
+   * @returns {void}
+   */
+  function updateReceiverField(field, value) {
+    const normalizedValue = String(value ?? '');
+    setReceiver(
+      /**
+       * @param {ContactState} currentState
+       * @returns {ContactState}
+       */
+      (currentState) =>
+        /** @type {ContactState} */ ({
+          ...currentState,
+          [field]: normalizedValue,
+        }),
+    );
+  }
+
+  /**
+   * Update destination query and reset validation id when user edits text.
+   *
+   * @param {string} value - Destination query text.
+   * @returns {void}
+   */
+  function handleDeliveryQueryChange(value) {
+    const normalizedValue = String(value ?? '');
+    setDeliveryAddress(
+      /**
+       * @param {DeliveryAddressState} currentState
+       * @returns {DeliveryAddressState}
+       */
+      (currentState) => ({
+        ...currentState,
+        query: normalizedValue,
+        validationId: '',
+      }),
+    );
+  }
+
+  /**
+   * Update one editable delivery-address detail field.
+   *
+   * @param {DeliveryEditableField} field - Delivery address field key.
+   * @param {string} value - Input value.
+   * @returns {void}
+   */
+  function updateDeliveryAddressField(field, value) {
+    const normalizedValue = String(value ?? '');
+    setDeliveryAddress(
+      /**
+       * @param {DeliveryAddressState} currentState
+       * @returns {DeliveryAddressState}
+       */
+      (currentState) =>
+        /** @type {DeliveryAddressState} */ ({
+          ...currentState,
+          [field]: normalizedValue,
+        }),
+    );
+  }
+
+  /**
+   * Update one editable package-row string field.
+   *
+   * @param {PackageEditableField} field - Package field key.
+   * @param {string} value - Input value.
+   * @returns {void}
+   */
+  function updatePackageRowField(field, value) {
+    const normalizedValue = String(value ?? '');
+    setPackageRow(
+      /**
+       * @param {PackageRowState} currentPackage
+       * @returns {PackageRowState}
+       */
+      (currentPackage) =>
+        /** @type {PackageRowState} */ ({
+          ...currentPackage,
+          [field]: normalizedValue,
+        }),
+    );
+  }
+
+  /**
+   * Toggle package fragile flag.
+   *
+   * @returns {void}
+   */
+  function togglePackageFragile() {
+    setPackageRow(
+      /**
+       * @param {PackageRowState} currentPackage
+       * @returns {PackageRowState}
+       */
+      (currentPackage) => ({
+        ...currentPackage,
+        isFragile: !currentPackage.isFragile,
+      }),
+    );
+  }
+
+  return (
+    <SafeAreaView className="flex-1 bg-stone-100">
+      <View className="flex-row items-center gap-2 border-b border-stone-200 bg-white px-4 py-3">
+        <TouchableOpacity
+          className="h-10 w-10 items-center justify-center"
+          onPress={() => navigation.goBack()}
+        >
+          <ArrowLeft color="#111827" size={20} />
+        </TouchableOpacity>
+        <View className="flex-1">
+          <Text className="text-base font-semibold text-stone-900">
+            Agregar paquete extra con IA
+          </Text>
+          <Text className="text-xs text-stone-500">
+            Orden base: {sourceOrderId || 'No disponible'}
+          </Text>
         </View>
-    );
+      </View>
 
-    const isProcessing = status === 'processing';
-
-    // ── Render ──────────────────────────────────────────────────────────────
-    return (
-        <SafeAreaView style={styles.container} edges={['top']}>
-
-            {/* Header */}
-            <View style={styles.header}>
-                <TouchableOpacity onPress={() => navigation.goBack()} style={styles.headerBtn}>
-                    <ArrowLeft color="#000000" size={24} />
-                </TouchableOpacity>
-                <View style={styles.headerCenter}>
-                    <Text style={styles.headerTitle}>Leer Etiqueta</Text>
-                    <View style={styles.modelBadge}>
-                        <Sparkles color="#7C3AED" size={10} />
-                        <Text style={styles.modelBadgeText}>claude-haiku-4-5</Text>
-                    </View>
-                </View>
-                <TouchableOpacity onPress={handleReset} style={styles.headerBtn}>
-                    <RotateCcw color="#666666" size={20} />
-                </TouchableOpacity>
-            </View>
-
-            <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-                <ScrollView
-                    style={styles.scroll}
-                    showsVerticalScrollIndicator={false}
-                    contentContainerStyle={styles.scrollContent}
-                    keyboardShouldPersistTaps="handled"
-                >
-                    {/* Status banner */}
-                    {status !== 'idle' && (
-                        <View style={[
-                            styles.banner,
-                            status === 'done' && styles.bannerSuccess,
-                            status === 'error' && styles.bannerError,
-                            status === 'processing' && styles.bannerInfo,
-                        ]}>
-                            {status === 'done' && <CheckCircle color="#059669" size={16} />}
-                            {status === 'error' && <AlertCircle color="#DC2626" size={16} />}
-                            {status === 'processing' && <ActivityIndicator size="small" color="#7C3AED" />}
-                            <Text style={[
-                                styles.bannerText,
-                                status === 'done' && { color: '#065F46' },
-                                status === 'error' && { color: '#991B1B' },
-                                status === 'processing' && { color: '#5B21B6' },
-                            ]}>{statusMsg}</Text>
-                            {status === 'done' && rawJson ? (
-                                <TouchableOpacity onPress={() => setShowRaw(true)}>
-                                    <Eye color="#059669" size={16} />
-                                </TouchableOpacity>
-                            ) : null}
-                        </View>
-                    )}
-
-                    {/* Info inicial */}
-                    {status === 'idle' && (
-                        <View style={styles.hint}>
-                            <View style={styles.hintTitleRow}>
-                                <Sparkles color="#7C3AED" size={16} />
-                                <Text style={styles.hintTitle}>Lectura con IA</Text>
-                            </View>
-                            <Text style={styles.hintText}>
-                                Tomá una foto de la etiqueta y Claude claude-haiku-4-5 extraerá automáticamente los datos del remitente, destinatario y empresa.{'\n\n'}
-                                Cuanto más clara y bien iluminada la foto, mejores resultados.
-                            </Text>
-                        </View>
-                    )}
-
-                    {/* ── Formulario ── */}
-                    <View style={styles.section}>
-                        <Text style={styles.sectionTitle}>Información del Envío</Text>
-                        <Field
-                            label="N° de Seguimiento"
-                            value={form.trackingNumber}
-                            onChangeText={setField('trackingNumber')}
-                            placeholder="Ej: FLX12345678"
-                            icon={FileText}
-                        />
-                        <View style={styles.fieldWrapper}>
-                            <Text style={styles.fieldLabel}>Empresa de Delivery</Text>
-                            <View style={styles.tagsRow}>
-                                {COMPANIES.map(c => {
-                                    const isSelected = form.company === c;
-                                    const colors = COMPANY_COLORS[c];
-                                    return (
-                                        <TouchableOpacity
-                                            key={c}
-                                            onPress={() => setField('company')(c)}
-                                            style={[
-                                                styles.companyTag,
-                                                { borderColor: colors.main },
-                                                isSelected ? { backgroundColor: colors.main } : { backgroundColor: 'transparent' }
-                                            ]}
-                                        >
-                                            <Text style={[
-                                                styles.companyTagText,
-                                                isSelected ? { color: '#FFF' } : { color: colors.main }
-                                            ]}>
-                                                {c}
-                                            </Text>
-                                        </TouchableOpacity>
-                                    );
-                                })}
-                            </View>
-                        </View>
-                    </View>
-
-                    <View style={styles.section}>
-                        <Text style={styles.sectionTitle}>📦 Remitente (Origen)</Text>
-                        <Field label="Nombre" value={form.senderName} onChangeText={setField('senderName')} placeholder="Nombre completo" icon={User} />
-                        <Field label="Teléfono" value={form.senderPhone} onChangeText={setField('senderPhone')} placeholder="+56 9 XXXX XXXX" icon={Phone} />
-                        <Field label="Dirección" value={form.senderAddress} onChangeText={setField('senderAddress')} placeholder="Calle, número, ciudad" icon={MapPin} multiline />
-                    </View>
-
-                    <View style={styles.section}>
-                        <Text style={styles.sectionTitle}>📍 Destinatario (Destino)</Text>
-                        <Field label="Nombre" value={form.recipientName} onChangeText={setField('recipientName')} placeholder="Nombre completo" icon={User} />
-                        <Field label="Teléfono" value={form.recipientPhone} onChangeText={setField('recipientPhone')} placeholder="+56 9 XXXX XXXX" icon={Phone} />
-                        <Field label="Dirección" value={form.recipientAddress} onChangeText={setField('recipientAddress')} placeholder="Calle, número, ciudad" icon={MapPin} multiline />
-                    </View>
-                </ScrollView>
-
-                {/* Footer Actions */}
-                <View style={styles.footer}>
-                    {status === 'done' ? (
-                        <View style={styles.footerButtonsRow}>
-                            <TouchableOpacity
-                                style={[styles.secondaryFooterButton, { flex: 1 }]}
-                                onPress={() => {
-                                    setForm(emptyForm);
-                                    setStatus('idle');
-                                    setStatusMsg('');
-                                    setRawJson('');
-                                }}
-                            >
-                                <RotateCcw color="#000000" size={18} />
-                                <Text style={styles.secondaryFooterButtonText}>Otro paquete</Text>
-                            </TouchableOpacity>
-
-                            <TouchableOpacity
-                                style={[styles.primaryFooterButton, { flex: 1.5 }]}
-                                onPress={() => {
-                                    handleSave();
-                                    if (form.recipientName || form.recipientAddress) {
-                                        navigation.goBack();
-                                    }
-                                }}
-                            >
-                                <CheckCircle color="#FFFFFF" size={20} />
-                                <Text style={styles.primaryFooterButtonText}>Guardar y finalizar</Text>
-                            </TouchableOpacity>
-                        </View>
-                    ) : (
-                        <TouchableOpacity
-                            style={[styles.captureButton, isProcessing && styles.captureButtonBusy]}
-                            onPress={handleCapture}
-                            disabled={isProcessing}
-                        >
-                            {isProcessing ? (
-                                <ActivityIndicator color="#FFFFFF" />
-                            ) : (
-                                <CameraIcon color="#FFFFFF" size={22} />
-                            )}
-                            <Text style={styles.captureButtonText}>
-                                {isProcessing ? 'ANALIZANDO...' : 'FOTOGRAFIAR ETIQUETA'}
-                            </Text>
-                        </TouchableOpacity>
-                    )}
-                </View>
-            </KeyboardAvoidingView>
-
-
-
-            {/* ── Raw JSON modal ── */}
-            <Modal visible={showRaw} animationType="slide" presentationStyle="pageSheet">
-                <SafeAreaView style={{ flex: 1, backgroundColor: '#FFFFFF' }}>
-                    <View style={styles.rawHeader}>
-                        <Text style={styles.rawTitle}>Respuesta de Claude</Text>
-                        <TouchableOpacity onPress={() => setShowRaw(false)}>
-                            <Text style={styles.rawClose}>Cerrar</Text>
-                        </TouchableOpacity>
-                    </View>
-                    <ScrollView contentContainerStyle={{ padding: 20 }}>
-                        <Text style={styles.rawText} selectable>{rawJson}</Text>
-                    </ScrollView>
-                </SafeAreaView>
-            </Modal>
-
-            {/* ── Overlay de procesamiento ── */}
-            {isProcessing && (
-                <View style={styles.processingOverlay}>
-                    <View style={styles.processingCard}>
-                        <ActivityIndicator size="large" color="#7C3AED" />
-                        <Text style={styles.processingTitle}>Claude está leyendo...</Text>
-                        <Text style={styles.processingSubtitle}>
-                            claude-haiku-4-5 analiza la imagen{'\n'}y extrae los datos automáticamente.
-                        </Text>
-                    </View>
-                </View>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        className="flex-1"
+      >
+        <ScrollView
+          className="flex-1 px-4"
+          contentContainerStyle={{ paddingBottom: 22, paddingTop: 14, gap: 14 }}
+          keyboardShouldPersistTaps="handled"
+        >
+          <TouchableOpacity
+            className="h-12 flex-row items-center justify-center gap-2 rounded-xl bg-stone-900"
+            onPress={() => {
+              if (isExtracting || isSaving) {
+                return;
+              }
+              void captureAndExtractLabel();
+            }}
+            activeOpacity={0.9}
+          >
+            {isExtracting ? (
+              <ActivityIndicator color="#FFFFFF" />
+            ) : (
+              <FileText color="#FFFFFF" size={16} />
             )}
-        </SafeAreaView>
-    );
+            <Text className="text-sm font-semibold text-white">
+              {isExtracting ? 'Leyendo etiqueta...' : 'Tomar Foto y Extraer Datos'}
+            </Text>
+            {!isExtracting ? <Sparkles color="#FFFFFF" size={14} /> : null}
+          </TouchableOpacity>
+
+          {statusMessage ? (
+            <View className="flex-row items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
+              <CheckCircle2 color="#047857" size={14} />
+              <Text className="flex-1 text-xs font-medium text-emerald-800">{statusMessage}</Text>
+            </View>
+          ) : null}
+
+          <View className="rounded-2xl border border-stone-200 bg-white p-4">
+            <Text className="mb-3 text-sm font-semibold text-stone-800">
+              Remitente (desde orden origen)
+            </Text>
+            <View className="gap-3">
+              <AppInput
+                label="Nombre"
+                value={sender.firstName}
+                editable={false}
+                leftIcon={<User color="#78716C" size={16} />}
+              />
+              <AppInput
+                label="Apellido"
+                value={sender.lastName}
+                editable={false}
+                leftIcon={<User color="#78716C" size={16} />}
+              />
+              <AppInput
+                label="Teléfono"
+                value={sender.phone}
+                editable={false}
+                leftIcon={<Phone color="#78716C" size={16} />}
+              />
+              <AppInput
+                label="Email"
+                value={sender.email}
+                editable={false}
+                leftIcon={<Mail color="#78716C" size={16} />}
+              />
+              {sender.isCompany ? (
+                <>
+                  <AppInput
+                    label="Razón social"
+                    value={sender.businessName}
+                    editable={false}
+                    leftIcon={<Box color="#78716C" size={16} />}
+                  />
+                  <AppInput
+                    label="RUT"
+                    value={sender.rut}
+                    editable={false}
+                    leftIcon={<FileText color="#78716C" size={16} />}
+                  />
+                </>
+              ) : null}
+            </View>
+          </View>
+
+          <View className="rounded-2xl border border-stone-200 bg-white p-4">
+            <Text className="mb-3 text-sm font-semibold text-stone-800">
+              Origen (desde orden origen)
+            </Text>
+            <AppInput
+              label="Dirección de origen"
+              value={sourcePickupAddress || 'No disponible'}
+              editable={false}
+              leftIcon={<MapPin color="#78716C" size={16} />}
+            />
+          </View>
+
+          <View className="rounded-2xl border border-stone-200 bg-white p-4">
+            <Text className="mb-3 text-sm font-semibold text-stone-800">Destinatario</Text>
+            <View className="gap-3">
+              <AppInput
+                label="Nombre"
+                value={receiver.firstName}
+                onChangeText={(value) => updateReceiverField('firstName', value)}
+                leftIcon={<User color="#78716C" size={16} />}
+              />
+              <AppInput
+                label="Apellido"
+                value={receiver.lastName}
+                onChangeText={(value) => updateReceiverField('lastName', value)}
+                leftIcon={<User color="#78716C" size={16} />}
+              />
+              <AppInput
+                label="Teléfono"
+                value={receiver.phone}
+                keyboardType="phone-pad"
+                onChangeText={(value) => updateReceiverField('phone', value)}
+                leftIcon={<Phone color="#78716C" size={16} />}
+              />
+              <AppInput
+                label="Email"
+                value={receiver.email}
+                autoCapitalize="none"
+                keyboardType="email-address"
+                onChangeText={(value) => updateReceiverField('email', value)}
+                leftIcon={<Mail color="#78716C" size={16} />}
+              />
+            </View>
+          </View>
+
+          <View className="rounded-2xl border border-stone-200 bg-white p-4">
+            <Text className="mb-3 text-sm font-semibold text-stone-800">Dirección destino</Text>
+            <View className="gap-3">
+              <AppInput
+                label="Buscar dirección"
+                value={deliveryAddress.query}
+                onChangeText={handleDeliveryQueryChange}
+                leftIcon={<MapPin color="#78716C" size={16} />}
+              />
+
+              {isFetchingSuggestions ? (
+                <View className="flex-row items-center gap-2">
+                  <ActivityIndicator size="small" color="#111827" />
+                  <Text className="text-xs text-stone-500">Buscando coincidencias...</Text>
+                </View>
+              ) : null}
+
+              {destinationSuggestions.length > 0 ? (
+                <View className="overflow-hidden rounded-xl border border-stone-200">
+                  {destinationSuggestions.map((suggestionCandidate, index) => (
+                    <TouchableOpacity
+                      key={`${suggestionCandidate.providerPlaceId || 'candidate'}-${index}`}
+                      className="border-b border-stone-100 px-3 py-2"
+                      onPress={() => {
+                        if (isValidatingDestination) {
+                          return;
+                        }
+                        void selectAndValidateDestination(suggestionCandidate);
+                      }}
+                    >
+                      <Text className="text-xs text-stone-700">
+                        {suggestionCandidate.displayName}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              ) : null}
+
+              {isValidatingDestination ? (
+                <View className="flex-row items-center gap-2">
+                  <ActivityIndicator size="small" color="#111827" />
+                  <Text className="text-xs text-stone-500">Validando dirección...</Text>
+                </View>
+              ) : null}
+
+              {deliveryAddress.validationId ? (
+                <View className="flex-row items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 self-start">
+                  <CheckCircle2 color="#047857" size={14} />
+                  <Text className="text-xs font-semibold text-emerald-800">Dirección validada</Text>
+                </View>
+              ) : null}
+
+              <AppInput
+                label="Unidad"
+                value={deliveryAddress.unit}
+                onChangeText={(value) => updateDeliveryAddressField('unit', value)}
+                leftIcon={<MapPin color="#78716C" size={16} />}
+              />
+              <AppInput
+                label="Departamento"
+                value={deliveryAddress.apartment}
+                onChangeText={(value) => updateDeliveryAddressField('apartment', value)}
+                leftIcon={<MapPin color="#78716C" size={16} />}
+              />
+              <AppInput
+                label="Piso"
+                value={deliveryAddress.floor}
+                onChangeText={(value) => updateDeliveryAddressField('floor', value)}
+                leftIcon={<MapPin color="#78716C" size={16} />}
+              />
+              <AppInput
+                label="Bloque"
+                value={deliveryAddress.block}
+                onChangeText={(value) => updateDeliveryAddressField('block', value)}
+                leftIcon={<MapPin color="#78716C" size={16} />}
+              />
+              <AppInput
+                label="Referencia"
+                value={deliveryAddress.reference}
+                onChangeText={(value) => updateDeliveryAddressField('reference', value)}
+                leftIcon={<MapPin color="#78716C" size={16} />}
+              />
+              <AppInput
+                label="Código postal"
+                value={deliveryAddress.postalCode}
+                onChangeText={(value) => updateDeliveryAddressField('postalCode', value)}
+                leftIcon={<MapPin color="#78716C" size={16} />}
+              />
+            </View>
+          </View>
+
+          <View className="rounded-2xl border border-stone-200 bg-white p-4">
+            <Text className="mb-3 text-sm font-semibold text-stone-800">Paquete</Text>
+            <View className="gap-3">
+              <AppInput
+                label="Descripción"
+                value={packageRow.description}
+                onChangeText={(value) => updatePackageRowField('description', value)}
+                leftIcon={<Box color="#78716C" size={16} />}
+              />
+              <AppInput
+                label="Peso (g)"
+                value={packageRow.weightG}
+                keyboardType="numeric"
+                onChangeText={(value) => updatePackageRowField('weightG', value)}
+                leftIcon={<Box color="#78716C" size={16} />}
+              />
+              <AppInput
+                label="Valor declarado CLP"
+                value={packageRow.declaredValueClp}
+                keyboardType="numeric"
+                onChangeText={(value) => updatePackageRowField('declaredValueClp', value)}
+                leftIcon={<FileText color="#78716C" size={16} />}
+              />
+
+              <TouchableOpacity
+                className={`flex-row items-center justify-between rounded-xl border px-3 py-3 ${
+                  packageRow.isFragile
+                    ? 'border-amber-400 bg-amber-50'
+                    : 'border-stone-300 bg-white'
+                }`}
+                onPress={togglePackageFragile}
+              >
+                <Text className="text-sm font-medium text-stone-700">Paquete frágil</Text>
+                <Text className="text-xs font-semibold text-stone-600">
+                  {packageRow.isFragile ? 'SI' : 'NO'}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                className={`flex-row items-center justify-between rounded-xl border px-3 py-3 ${
+                  isPayOnDelivery ? 'border-indigo-400 bg-indigo-50' : 'border-stone-300 bg-white'
+                }`}
+                onPress={() => setIsPayOnDelivery((currentValue) => !currentValue)}
+              >
+                <Text className="text-sm font-medium text-stone-700">Pago contra entrega</Text>
+                <Text className="text-xs font-semibold text-stone-600">
+                  {isPayOnDelivery ? 'ACTIVO' : 'INACTIVO'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          <View className="rounded-2xl border border-stone-200 bg-white p-4">
+            <Text className="mb-3 text-sm font-semibold text-stone-800">Marketplace origen</Text>
+            <View className="flex-row flex-wrap gap-2">
+              {MARKETPLACE_OPTIONS.map((sourceOption) => (
+                <TouchableOpacity
+                  key={sourceOption}
+                  className={`rounded-full border px-3 py-1.5 ${
+                    marketplaceSource === sourceOption
+                      ? 'border-stone-900 bg-stone-900'
+                      : 'border-stone-300 bg-white'
+                  }`}
+                  onPress={() => setMarketplaceSource(sourceOption)}
+                >
+                  <Text
+                    className={`text-xs font-semibold ${
+                      marketplaceSource === sourceOption ? 'text-white' : 'text-stone-700'
+                    }`}
+                  >
+                    {sourceOption}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+
+      <View className="border-t border-stone-200 bg-white px-4 py-3">
+        <TouchableOpacity
+          className={`h-12 flex-row items-center justify-center gap-2 rounded-xl ${
+            isSaving || isExtracting ? 'bg-emerald-600/70' : 'bg-emerald-600'
+          }`}
+          onPress={() => {
+            if (isSaving || isExtracting) {
+              return;
+            }
+            void saveExtraPackage();
+          }}
+          activeOpacity={0.9}
+        >
+          {isSaving ? (
+            <ActivityIndicator color="#FFFFFF" />
+          ) : (
+            <CheckCircle2 color="#FFFFFF" size={16} />
+          )}
+          <Text className="text-sm font-semibold text-white">
+            {isSaving ? 'Guardando...' : 'Confirmar paquete extra'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+    </SafeAreaView>
+  );
 }
-
-// ─── Estilos ──────────────────────────────────────────────────────────────────
-const styles = StyleSheet.create({
-    container: { flex: 1, backgroundColor: '#F8F9FA' },
-
-    header: {
-        flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-        paddingHorizontal: 20, paddingTop: 10, paddingBottom: 16,
-        backgroundColor: '#FFFFFF', borderBottomWidth: 1, borderBottomColor: '#EEEEEE',
-    },
-    headerBtn: { width: 40, height: 40, justifyContent: 'center' },
-    headerCenter: { alignItems: 'center', gap: 4 },
-    headerTitle: { fontSize: 20, fontWeight: '900', color: '#000000' },
-    modelBadge: {
-        flexDirection: 'row', alignItems: 'center', gap: 4,
-        backgroundColor: '#F5F3FF', paddingHorizontal: 8, paddingVertical: 3,
-        borderRadius: 20,
-    },
-    modelBadgeText: { fontSize: 10, fontWeight: '800', color: '#7C3AED' },
-
-    scroll: { flex: 1 },
-    scrollContent: { padding: 20, paddingBottom: 60, gap: 16 },
-
-    captureButton: {
-        flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-        backgroundColor: '#000000', height: 64, borderRadius: 18, gap: 12,
-        shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.15, shadowRadius: 8, elevation: 4,
-    },
-    captureButtonBusy: { backgroundColor: '#7C3AED' },
-    captureButtonText: { color: '#FFFFFF', fontSize: 15, fontWeight: '900', letterSpacing: 0.5 },
-
-    banner: {
-        flexDirection: 'row', alignItems: 'center', gap: 10,
-        padding: 14, borderRadius: 14, borderWidth: 1,
-    },
-    bannerSuccess: { backgroundColor: '#ECFDF5', borderColor: '#BBF7D0' },
-    bannerError: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
-    bannerInfo: { backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' },
-    bannerText: { flex: 1, fontSize: 13, fontWeight: '600' },
-
-    hint: {
-        backgroundColor: '#FAFAFA', borderRadius: 16, padding: 16,
-        borderWidth: 1, borderColor: '#E9D5FF', gap: 10,
-    },
-    hintTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-    hintTitle: { fontSize: 14, fontWeight: '900', color: '#7C3AED' },
-    hintText: { fontSize: 13, color: '#555555', fontWeight: '500', lineHeight: 21 },
-
-    section: {
-        backgroundColor: '#FFFFFF', borderRadius: 20, padding: 20, gap: 18,
-        borderWidth: 1, borderColor: '#EEEEEE',
-        shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.03, shadowRadius: 6, elevation: 1,
-    },
-    sectionTitle: { fontSize: 15, fontWeight: '900', color: '#000000' },
-
-    fieldWrapper: { gap: 6 },
-    fieldLabel: { fontSize: 11, fontWeight: '800', color: '#BBBBBB', textTransform: 'uppercase', letterSpacing: 0.8 },
-    fieldRow: {
-        flexDirection: 'row', alignItems: 'center', gap: 10,
-        borderBottomWidth: 1, borderBottomColor: '#F3F3F3', paddingBottom: 8,
-    },
-    fieldInput: { flex: 1, fontSize: 15, color: '#000000', fontWeight: '500' },
-    fieldInputMulti: { height: 52, textAlignVertical: 'top', paddingTop: 4 },
-
-    tagsRow: {
-        flexDirection: 'row',
-        flexWrap: 'wrap',
-        gap: 8,
-        marginTop: 4,
-    },
-    companyTag: {
-        paddingHorizontal: 12,
-        paddingVertical: 6,
-        borderRadius: 10,
-        borderWidth: 1.5,
-    },
-    companyTagText: {
-        fontSize: 13,
-        fontWeight: '900',
-        letterSpacing: 0.3,
-    },
-
-    saveButton: {
-        flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-        backgroundColor: '#000000', height: 60, borderRadius: 16, gap: 12,
-    },
-    saveButtonDone: { backgroundColor: '#059669' },
-    saveButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '900', letterSpacing: 0.5 },
-
-    overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-    sheet: {
-        backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24,
-        padding: 24, paddingTop: 12, gap: 4,
-    },
-    sheetHandle: {
-        width: 40, height: 4, borderRadius: 2, backgroundColor: '#DDDDDD',
-        alignSelf: 'center', marginBottom: 16,
-    },
-    sheetTitle: { fontSize: 18, fontWeight: '900', color: '#000000', marginBottom: 8 },
-    sheetOption: {
-        flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-        paddingVertical: 16, paddingHorizontal: 8, borderRadius: 12,
-    },
-    sheetOptionActive: { backgroundColor: '#F0FDF4' },
-    sheetOptionText: { fontSize: 17, fontWeight: '600', color: '#333333' },
-    sheetOptionTextActive: { color: '#059669', fontWeight: '800' },
-    sheetCancel: { marginTop: 8, alignItems: 'center', padding: 12 },
-    sheetCancelText: { fontSize: 15, fontWeight: '700', color: '#999999' },
-    footer: {
-        padding: 20,
-        backgroundColor: '#FFFFFF',
-        borderTopWidth: 1,
-        borderTopColor: '#EEEEEE',
-        paddingBottom: Platform.OS === 'ios' ? 40 : 20,
-    },
-    footerButtonsRow: {
-        flexDirection: 'row',
-        gap: 12,
-    },
-    primaryFooterButton: {
-        backgroundColor: '#000000',
-        height: 56,
-        borderRadius: 16,
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 10,
-    },
-    primaryFooterButtonText: {
-        color: '#FFFFFF',
-        fontSize: 15,
-        fontWeight: '900',
-    },
-    secondaryFooterButton: {
-        backgroundColor: '#FFFFFF',
-        height: 56,
-        borderRadius: 16,
-        borderWidth: 1,
-        borderColor: '#DDDDDD',
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 8,
-    },
-    secondaryFooterButtonText: {
-        color: '#000000',
-        fontSize: 14,
-        fontWeight: '800',
-    },
-
-    rawHeader: {
-        flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-        padding: 20, borderBottomWidth: 1, borderBottomColor: '#EEEEEE',
-    },
-    rawTitle: { fontSize: 18, fontWeight: '900', color: '#000000' },
-    rawClose: { fontSize: 16, fontWeight: '700', color: '#7C3AED' },
-    rawText: {
-        fontSize: 13, color: '#333333', lineHeight: 22,
-        fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace'
-    },
-
-    processingOverlay: {
-        ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.55)',
-        justifyContent: 'center', alignItems: 'center', padding: 40,
-    },
-    processingCard: {
-        backgroundColor: '#FFFFFF', borderRadius: 24, padding: 32,
-        alignItems: 'center', gap: 16, width: '100%',
-    },
-    processingTitle: { fontSize: 20, fontWeight: '900', color: '#000000' },
-    processingSubtitle: {
-        fontSize: 14, color: '#666666', fontWeight: '500',
-        textAlign: 'center', lineHeight: 22,
-    },
-});

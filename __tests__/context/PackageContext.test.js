@@ -38,10 +38,25 @@ function buildAssignedOrdersPayload() {
         receiver_name: 'Cliente Demo',
         receiver_phone: '+56911111111',
         address: 'Av. Apoquindo 1234, Las Condes, RM',
+        pickup_address: 'Av. Apoquindo 1234, Las Condes, RM',
         address_type: 'PICKUP',
         created_at: '2026-03-21T12:00:00.000Z',
       },
     ],
+  };
+}
+
+/**
+ * Build one valid response payload for extra-package label creation flow.
+ *
+ * @returns {Record<string, unknown>} Create response payload.
+ */
+function buildLabelCreatePayload() {
+  return {
+    detail: 'Extra package created successfully.',
+    order_id: '550e8400-e29b-41d4-a716-446655440000',
+    package_id: '661e8400-e29b-41d4-a716-446655440000',
+    status: 'RETIRADO',
   };
 }
 
@@ -141,5 +156,55 @@ describe('PackageContext', () => {
     );
     expect(global.fetch.mock.calls[0][1].credentials).toBe('include');
     expect(global.fetch.mock.calls[1][1].headers.Authorization).toBe('Bearer fresh-driver-token');
+  });
+
+  it('creates extra package from label and refreshes assigned orders', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => buildAssignedOrdersPayload(),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => buildLabelCreatePayload(),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => buildAssignedOrdersPayload(),
+      });
+
+    render(
+      <PackageProvider>
+        <PackageContextProbe />
+      </PackageProvider>,
+    );
+
+    await waitFor(() => {
+      expect(packageContextValue).not.toBeNull();
+      expect(packageContextValue.packages.length).toBe(1);
+    });
+
+    await act(async () => {
+      await packageContextValue.createExtraPackageFromLabel({
+        sourceOrderId: '550e8400-e29b-41d4-a716-446655440000',
+        receiver: {
+          firstName: 'Cliente',
+          lastName: 'Demo',
+          phone: '+56911111111',
+          email: 'cliente@example.com',
+        },
+        deliveryAddress: {
+          validationId: '771e8400-e29b-41d4-a716-446655440000',
+        },
+        packages: [{ description: 'Caja demo' }],
+      });
+    });
+
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(mockBuildBackendEndpointUrl).toHaveBeenCalledWith(
+      '/api/shipments/routes/mobile/extra-package/label/create/',
+    );
   });
 });

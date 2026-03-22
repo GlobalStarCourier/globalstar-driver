@@ -452,7 +452,7 @@ export default function PackageDetailScreen({ route, navigation }) {
               style={styles.optionItem}
               onPress={() => {
                 setShowActionSheet(false);
-                navigation.navigate('LabelScanner', { packageId: null });
+                navigation.navigate('LabelScanner', { sourceOrderId: pkg.orderId || null });
               }}
             >
               <View style={styles.optionIconContainer}>
